@@ -4,11 +4,9 @@
   "description": "Apexiel capstone — desktop review-and-cut editor for AI-assisted motorsports video indexing",
   "main": "main.js",
   "scripts": {
-    "start": "electron .",
-    "prepare": "husky"
+    "start": "electron ."
   },
   "devDependencies": {
-    "electron": "^37.2.0",
-    "husky": "^9.1.7"
+    "electron": "^37.2.0"
   }
 }

@@ -4,9 +4,49 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'" />
   <title>Capstone Video Editor</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>Capstone Video Editor</h1>
-  <p>Window shell (CP1) — landing UI comes in CP2.</p>
+  <!-- Landing: project picker -->
+  <section id="view-landing">
+    <div id="landing-card">
+      <h1 id="landing-logo">Apexiel</h1>
+      <div id="project-grid">
+        <button class="project-tile" id="btn-new-project">New Project</button>
+        <!-- existing project tiles injected by app.js -->
+      </div>
+    </div>
+  </section>
+
+  <!-- Editor -->
+  <section id="view-editor" hidden>
+    <header id="status-header">
+      <span id="video-name">No Video Selected</span>
+    </header>
+
+    <div id="layout">
+      <nav id="button-column">
+        <button id="btn-open-video">Open Video</button>
+        <button id="btn-detect-vehicles" disabled>Detect Vehicles</button>
+        <button id="btn-save-changes" disabled>Save Changes</button>
+        <button id="btn-export" disabled>Export</button>
+      </nav>
+
+      <main id="main-area">
+        <div id="video-container">
+          <video id="video-player" controls></video>
+          <div id="video-placeholder">Open a video to begin</div>
+        </div>
+        <div id="status-line" hidden>
+          <span id="status-stage"></span>
+          <span id="status-elapsed"></span>
+          <span id="status-tokens"></span>
+          <button id="btn-cancel" hidden>Cancel</button>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <script src="app.js"></script>
 </body>
 </html>

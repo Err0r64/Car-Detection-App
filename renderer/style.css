@@ -1,0 +1,206 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #1e1e1e;
+  --panel: #252526;
+  --border: #3c3c3c;
+  --text: #d4d4d4;
+  --text-dim: #808080;
+  --accent: #0e639c;
+  --accent-hover: #1177bb;
+  --brand-red: #e8151b;
+  --brand-red-hover: #c41217;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+/* --- Landing: project picker --- */
+
+#view-landing {
+  flex: 1;
+  display: flex;
+  padding: 24px;
+  min-height: 0;
+}
+
+#landing-card {
+  flex: 1;
+  background: #fff;
+  border-radius: 4px;
+  padding: 40px;
+  overflow-y: auto;
+}
+
+#landing-logo {
+  text-align: center;
+  color: #111;
+  font-size: 48px;
+  font-weight: 800;
+  margin-bottom: 40px;
+}
+
+#landing-logo::before {
+  content: "⌃ ";
+  color: var(--brand-red);
+}
+
+#project-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 48px 56px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.project-tile {
+  height: 120px;
+  background: var(--brand-red);
+  color: #fff;
+  border: none;
+  font-size: 20px;
+  font-family: inherit;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 8px;
+}
+
+.project-tile:hover {
+  background: var(--brand-red-hover);
+}
+
+/* --- Editor --- */
+
+#view-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#status-header {
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+#button-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 180px;
+  padding: 16px 12px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+#button-column button {
+  padding: 10px 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+#button-column button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+#button-column button:disabled {
+  background: #333;
+  color: var(--text-dim);
+  cursor: default;
+}
+
+#main-area {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  padding: 16px;
+  gap: 12px;
+}
+
+#video-container {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+#video-player {
+  max-width: 100%;
+  max-height: 100%;
+  width: 100%;
+  height: 100%;
+}
+
+#video-player:not([src]) {
+  display: none;
+}
+
+#video-placeholder {
+  position: absolute;
+  color: var(--text-dim);
+  font-size: 16px;
+  pointer-events: none;
+}
+
+#status-line {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+#btn-cancel {
+  margin-left: auto;
+  padding: 6px 14px;
+  background: #a1260d;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#btn-cancel:hover {
+  background: #c42b1c;
+}

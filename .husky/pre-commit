@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+
+if git diff --cached --name-only --diff-filter=ACMR | grep -E '^node_modules/' >/dev/null 2>&1; then
+	echo "Error: staged files under node_modules/ are not allowed."
+	echo "Run: git rm -r --cached node_modules"
+	exit 1
+fi

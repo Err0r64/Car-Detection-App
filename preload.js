@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('editorAPI', {
   // Project picker (landing screen)
   listProjects: () => ipcRenderer.invoke('list-projects'),
   createProject: () => ipcRenderer.invoke('create-project'),
+  deleteProject: (projectPath) => ipcRenderer.invoke('delete-project', projectPath),
 
   // Editor
   openVideo: async () => null,

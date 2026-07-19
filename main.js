@@ -44,6 +44,27 @@ ipcMain.handle('create-project', async (event) => {
   return project;
 });
 
+ipcMain.handle('delete-project', async (event, projectPath) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const projects = readRegistry();
+  const project = projects.find((p) => p.path === projectPath);
+  if (!project) return false;
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Remove Project',
+    message: `Remove "${project.name}" from the project list?`,
+    detail: 'This only removes the project from the list on the landing screen. The folder and its files stay on disk, and you can re-add it later via New Project.',
+    buttons: ['Remove', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+
+  writeRegistry(projects.filter((p) => p.path !== projectPath));
+  return true;
+});
+
 // --- Window ---
 
 function createWindow() {

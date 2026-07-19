@@ -1,0 +1,12 @@
+{
+  "name": "capstone-video-editor",
+  "version": "0.1.0",
+  "description": "Apexiel capstone — desktop review-and-cut editor for AI-assisted motorsports video indexing",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^37.2.0"
+  }
+}

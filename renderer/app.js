@@ -21,6 +21,13 @@ const statusLine = document.getElementById('status-line');
 const statusStage = document.getElementById('status-stage');
 const statusElapsed = document.getElementById('status-elapsed');
 const statusTokens = document.getElementById('status-tokens');
+const timelineEl = document.getElementById('timeline');
+
+Timeline.init({
+  ruler: document.getElementById('timeline-ruler'),
+  track: document.getElementById('timeline-track'),
+  video: videoPlayer,
+});
 
 // Active project { name, path } and video { path, name, url }, null until chosen.
 let currentProject = null;
@@ -86,6 +93,9 @@ function exitToLanding() {
   videoPlayer.load();
   videoPlaceholder.textContent = 'Open a video to begin';
   videoPlaceholder.hidden = false;
+  currentDetections = null;
+  timelineEl.hidden = true;
+  Timeline.clear();
   btnDetectVehicles.disabled = true;
   btnSaveChanges.disabled = true;
   btnExport.disabled = true;
@@ -106,6 +116,20 @@ refreshProjectGrid();
 
 // --- Editor ---
 
+// TEMP Phase 3: replaced by real pipeline in Phase 5 — fixture data stands in
+// for analysis output. All times in the fixture are integer seconds.
+let currentDetections = null;
+
+async function loadFixtureDetections() {
+  try {
+    const res = await fetch('../fixtures/sample_detections.json');
+    currentDetections = await res.json();
+  } catch (err) {
+    console.error('Failed to load fixture detections:', err);
+    currentDetections = null;
+  }
+}
+
 // Shows `video` ({ path, name, url }) in the player and enables the buttons
 // that need a loaded video.
 function showVideo(video) {
@@ -115,7 +139,16 @@ function showVideo(video) {
   videoPlaceholder.hidden = true;
   btnDetectVehicles.disabled = false;
   btnSaveChanges.disabled = false;
+  loadFixtureDetections();
 }
+
+videoPlayer.addEventListener('loadedmetadata', () => {
+  if (!currentVideo) return;
+  timelineEl.hidden = false;
+  Timeline.setVideo(videoPlayer.duration);
+});
+
+window.addEventListener('resize', () => Timeline.handleResize());
 
 btnOpenVideo.addEventListener('click', async () => {
   const result = await window.editorAPI.openVideo();

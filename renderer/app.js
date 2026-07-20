@@ -68,6 +68,7 @@ function exitToLanding() {
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
+  videoPlaceholder.textContent = 'Open a video to begin';
   videoPlaceholder.hidden = false;
   btnDetectVehicles.disabled = true;
   btnSaveChanges.disabled = true;
@@ -94,6 +95,13 @@ btnOpenVideo.addEventListener('click', async () => {
   if (!result) return;
   currentVideo = result;
   videoName.textContent = result.name;
+  videoPlayer.src = result.url;
   videoPlaceholder.hidden = true;
   btnDetectVehicles.disabled = false;
+});
+
+videoPlayer.addEventListener('error', () => {
+  if (!currentVideo) return;
+  videoPlaceholder.hidden = false;
+  videoPlaceholder.textContent = `Could not play ${currentVideo.name}`;
 });

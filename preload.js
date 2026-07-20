@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld('editorAPI', {
   deleteProject: (projectPath) => ipcRenderer.invoke('delete-project', projectPath),
 
   // Editor
-  openVideo: async () => null,
+  openVideo: () => ipcRenderer.invoke('open-video'),
   startAnalysis: (videoPath) => {},
   cancelAnalysis: () => {},
   onAnalysisEvent: (callback) => {},

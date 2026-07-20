@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 
 // --- Project registry (userData/projects.json): [{ name, path }] ---
 
@@ -63,6 +64,21 @@ ipcMain.handle('delete-project', async (event, projectPath) => {
 
   writeRegistry(projects.filter((p) => p.path !== projectPath));
   return true;
+});
+
+ipcMain.handle('open-video', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Open Video',
+    properties: ['openFile'],
+    filters: [{ name: 'Videos', extensions: ['mp4', 'mov'] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+
+  const filePath = result.filePaths[0];
+  // url: file:// form usable as a <video> src. Built here because neither the
+  // renderer nor the sandboxed preload has access to pathToFileURL.
+  return { path: filePath, name: path.basename(filePath), url: pathToFileURL(filePath).href };
 });
 
 // --- Window ---

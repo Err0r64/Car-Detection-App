@@ -82,6 +82,52 @@ ipcMain.handle('open-video', async (event) => {
   return { path: filePath, name: path.basename(filePath), url: pathToFileURL(filePath).href };
 });
 
+// --- Project save/load (.vproj.json) ---
+
+const PROJECT_FILE_FILTERS = [{ name: 'Video Project', extensions: ['vproj.json'] }];
+
+ipcMain.handle('save-project', async (event, projectObj) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showSaveDialog(win, {
+    title: 'Save Project',
+    filters: PROJECT_FILE_FILTERS,
+    defaultPath: 'project.vproj.json',
+  });
+  if (result.canceled || !result.filePath) return null;
+
+  try {
+    fs.writeFileSync(result.filePath, JSON.stringify(projectObj, null, 2));
+    return result.filePath;
+  } catch (err) {
+    dialog.showErrorBox('Save failed', `Could not write project file:\n${err.message}`);
+    return null;
+  }
+});
+
+ipcMain.handle('load-project', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Load Project',
+    properties: ['openFile'],
+    filters: PROJECT_FILE_FILTERS,
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+
+  try {
+    const project = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf8'));
+    // videoUrl accompanies the project so the renderer can restore playback;
+    // it is derived, not part of the saved file.
+    const videoUrl =
+      typeof project.videoPath === 'string' && project.videoPath
+        ? pathToFileURL(project.videoPath).href
+        : null;
+    return { project, videoUrl };
+  } catch (err) {
+    dialog.showErrorBox('Load failed', `Could not read project file:\n${err.message}`);
+    return null;
+  }
+});
+
 // --- Stubbed analysis pipeline ---
 
 let analysisChild = null;

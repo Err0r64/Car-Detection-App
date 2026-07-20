@@ -1,8 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-// IPC surface for the renderer. Editor methods are stubbed to no-ops until
-// their main-process handlers land in later checkpoints:
-//   saveProject/loadProject -> CP5
+// IPC surface for the renderer.
 contextBridge.exposeInMainWorld('editorAPI', {
   // Project picker (landing screen)
   listProjects: () => ipcRenderer.invoke('list-projects'),
@@ -14,6 +12,6 @@ contextBridge.exposeInMainWorld('editorAPI', {
   startAnalysis: (videoPath) => ipcRenderer.invoke('start-analysis', videoPath),
   cancelAnalysis: () => ipcRenderer.send('cancel-analysis'),
   onAnalysisEvent: (callback) => ipcRenderer.on('analysis-event', (e, data) => callback(data)),
-  saveProject: async (projectObj) => null,
-  loadProject: async () => null,
+  saveProject: (projectObj) => ipcRenderer.invoke('save-project', projectObj),
+  loadProject: () => ipcRenderer.invoke('load-project'),
 });

@@ -12,6 +12,7 @@ const btnDetectVehicles = document.getElementById('btn-detect-vehicles');
 const btnSaveChanges = document.getElementById('btn-save-changes');
 const btnExport = document.getElementById('btn-export');
 const btnBackToProjects = document.getElementById('btn-back-to-projects');
+const btnLoadProject = document.getElementById('btn-load-project');
 const btnCancel = document.getElementById('btn-cancel');
 const videoName = document.getElementById('video-name');
 const videoPlayer = document.getElementById('video-player');
@@ -105,14 +106,52 @@ refreshProjectGrid();
 
 // --- Editor ---
 
-btnOpenVideo.addEventListener('click', async () => {
-  const result = await window.editorAPI.openVideo();
-  if (!result) return;
-  currentVideo = result;
-  videoName.textContent = result.name;
-  videoPlayer.src = result.url;
+// Shows `video` ({ path, name, url }) in the player and enables the buttons
+// that need a loaded video.
+function showVideo(video) {
+  currentVideo = video;
+  videoName.textContent = video.name;
+  videoPlayer.src = video.url;
   videoPlaceholder.hidden = true;
   btnDetectVehicles.disabled = false;
+  btnSaveChanges.disabled = false;
+}
+
+btnOpenVideo.addEventListener('click', async () => {
+  const result = await window.editorAPI.openVideo();
+  if (result) showVideo(result);
+});
+
+// --- Project save/load (placeholder project object) ---
+
+btnSaveChanges.addEventListener('click', async () => {
+  const projectObj = {
+    videoPath: currentVideo ? currentVideo.path : null,
+    detections: [],
+    edits: {},
+  };
+  const savedPath = await window.editorAPI.saveProject(projectObj);
+  if (savedPath) {
+    statusStage.textContent = `Saved ${savedPath}`;
+    statusElapsed.textContent = '';
+    statusTokens.textContent = '';
+    statusLine.hidden = false;
+  }
+});
+
+btnLoadProject.addEventListener('click', async () => {
+  if (analysisRunning) return;
+  const result = await window.editorAPI.loadProject();
+  if (!result) return;
+  const { project, videoUrl } = result;
+  if (project.videoPath && videoUrl) {
+    const name = project.videoPath.split(/[\\/]/).pop();
+    showVideo({ path: project.videoPath, name, url: videoUrl });
+  }
+  statusStage.textContent = `Loaded project (${(project.detections || []).length} detections)`;
+  statusElapsed.textContent = '';
+  statusTokens.textContent = '';
+  statusLine.hidden = false;
 });
 
 videoPlayer.addEventListener('error', () => {

@@ -29,13 +29,17 @@ const Timeline = (() => {
   let trackEl = null;
   let videoEl = null;
   let playheadEl = null;
+  let dragReadoutEl = null;
   let durationS = 0;
   let pxPerSec = 0;
   let rafId = null;
   let appearances = [];
   let selectedIndex = null;
+  let dragState = null;
   let onIntervalClick = null;
   let onEmptyTrackClick = null;
+  let onDragPreview = null;
+  let onDragCommit = null;
 
   function init(els, callbacks = {}) {
     rulerEl = els.ruler;
@@ -43,11 +47,18 @@ const Timeline = (() => {
     videoEl = els.video;
     onIntervalClick = callbacks.onIntervalClick || null;
     onEmptyTrackClick = callbacks.onEmptyTrackClick || null;
+    onDragPreview = callbacks.onDragPreview || null;
+    onDragCommit = callbacks.onDragCommit || null;
 
     playheadEl = document.createElement('div');
     playheadEl.id = 'playhead';
     playheadEl.hidden = true;
     trackEl.appendChild(playheadEl);
+
+    dragReadoutEl = document.createElement('div');
+    dragReadoutEl.className = 'drag-readout';
+    dragReadoutEl.hidden = true;
+    trackEl.appendChild(dragReadoutEl);
 
     videoEl.addEventListener('timeupdate', () => updatePlayhead());
     videoEl.addEventListener('seeked', () => updatePlayhead());
@@ -110,7 +121,7 @@ const Timeline = (() => {
   // overflow past MAX_LANES.
   function assignLanes(items) {
     const laneEnds = [];
-    return items.map((a) => {
+    return items.map(({ appearance: a }) => {
       for (let lane = 0; lane < MAX_LANES; lane++) {
         if (!(laneEnds[lane] > a.start_s)) {
           laneEnds[lane] = a.end_s;
@@ -121,14 +132,16 @@ const Timeline = (() => {
     });
   }
 
-  function renderIntervals() {
+  function renderIntervals(items = appearances) {
     trackEl.querySelectorAll('.interval, .interval-overflow').forEach((el) => el.remove());
-    if (durationS <= 0 || appearances.length === 0) return;
+    if (durationS <= 0 || items.length === 0) return;
 
-    const ordered = [...appearances].sort((a, b) => a.start_s - b.start_s);
+    const ordered = items
+      .map((appearance, index) => ({ appearance, index }))
+      .sort((a, b) => a.appearance.start_s - b.appearance.start_s);
     const lanes = assignLanes(ordered);
 
-    ordered.forEach((a, i) => {
+    ordered.forEach(({ appearance: a, index: originalIndex }, i) => {
       const left = timeToX(a.start_s);
       const width = Math.max(timeToX(a.end_s) - left, 2);
       const lane = lanes[i];
@@ -153,13 +166,25 @@ const Timeline = (() => {
       } else {
         bar.title = label;
       }
-      const originalIndex = appearances.indexOf(a);
       bar.dataset.index = String(originalIndex);
       if (originalIndex === selectedIndex) bar.classList.add('selected');
       bar.style.left = `${left}px`;
       bar.style.width = `${width}px`;
       bar.style.top = `${LANE_TOP_PX + lane * LANE_HEIGHT_PX}px`;
       bar.style.height = `${BAR_HEIGHT_PX}px`;
+
+      const startEdge = document.createElement('div');
+      startEdge.className = 'interval-edge interval-edge-start';
+      startEdge.dataset.bound = 'start_s';
+      startEdge.title = 'Drag start';
+      bar.appendChild(startEdge);
+
+      const endEdge = document.createElement('div');
+      endEdge.className = 'interval-edge interval-edge-end';
+      endEdge.dataset.bound = 'end_s';
+      endEdge.title = 'Drag end';
+      bar.appendChild(endEdge);
+
       trackEl.appendChild(bar);
     });
   }
@@ -167,8 +192,7 @@ const Timeline = (() => {
   // Sets the appearances rendered on the track (integer-second data straight
   // from the fixture/pipeline; this module never mutates it).
   function setDetections(list) {
-    appearances = Array.isArray(list) ? list : [];
-    selectedIndex = null;
+    appearances = Array.isArray(list) ? list.map((appearance) => ({ ...appearance })) : [];
     renderIntervals();
   }
 
@@ -179,6 +203,117 @@ const Timeline = (() => {
     trackEl.querySelectorAll('.interval').forEach((bar) => {
       bar.classList.toggle('selected', index !== null && bar.dataset.index === String(index));
     });
+  }
+
+  // --- Interval dragging ---
+
+  function pointerTime(clientX) {
+    const rect = trackEl.getBoundingClientRect();
+    const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+    return xToTime(x);
+  }
+
+  function previewForDrag(clientX) {
+    if (!dragState) return;
+    const preview = appearances.map((appearance) => ({ ...appearance }));
+    const item = preview[dragState.index];
+    const maxTime = Math.floor(durationS);
+
+    if (dragState.kind === 'bound') {
+      const value = Math.round(pointerTime(clientX));
+      if (dragState.bound === 'start_s') {
+        item.start_s = Math.max(0, Math.min(value, item.end_s - 1));
+      } else {
+        item.end_s = Math.min(maxTime, Math.max(value, item.start_s + 1));
+      }
+      dragState.action = {
+        type: 'move-bound',
+        index: dragState.index,
+        bound: dragState.bound,
+        value: item[dragState.bound],
+      };
+      dragReadoutEl.textContent = `${dragState.bound === 'start_s' ? 'Start' : 'End'} ${formatMMSS(item[dragState.bound])}`;
+    } else {
+      const requestedDelta = Math.round(pointerTime(clientX) - dragState.anchorTime);
+      const minDelta = -dragState.original.start_s;
+      const maxDelta = maxTime - dragState.original.end_s;
+      const delta = Math.max(minDelta, Math.min(requestedDelta, maxDelta));
+      item.start_s = dragState.original.start_s + delta;
+      item.end_s = dragState.original.end_s + delta;
+      dragState.action = {
+        type: 'move-interval',
+        index: dragState.index,
+        delta_s: delta,
+      };
+      dragReadoutEl.textContent = `${formatMMSS(item.start_s)} - ${formatMMSS(item.end_s)}`;
+    }
+
+    const rect = trackEl.getBoundingClientRect();
+    dragReadoutEl.style.left = `${Math.min(Math.max(clientX - rect.left, 44), rect.width - 44)}px`;
+    dragReadoutEl.hidden = false;
+    renderIntervals(preview);
+    if (onDragPreview) onDragPreview(preview, dragState.index);
+  }
+
+  function cleanupDrag() {
+    window.removeEventListener('pointermove', onIntervalPointerMove);
+    window.removeEventListener('pointerup', onIntervalPointerUp);
+    window.removeEventListener('pointercancel', onIntervalPointerCancel);
+    document.body.classList.remove('timeline-dragging');
+    dragReadoutEl.hidden = true;
+  }
+
+  function onIntervalPointerMove(event) {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    previewForDrag(event.clientX);
+  }
+
+  function onIntervalPointerUp(event) {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    previewForDrag(event.clientX);
+    const action = dragState.action;
+    const index = dragState.index;
+    cleanupDrag();
+    dragState = null;
+    renderIntervals();
+    if (action && onDragCommit) onDragCommit(action, index);
+  }
+
+  function onIntervalPointerCancel(event) {
+    if (!dragState || event.pointerId !== dragState.pointerId) return;
+    const index = dragState.index;
+    cleanupDrag();
+    dragState = null;
+    renderIntervals();
+    if (onDragPreview) onDragPreview(appearances, index);
+  }
+
+  function beginIntervalDrag(event, bar, edge) {
+    const index = Number(bar.dataset.index);
+    if (!Number.isInteger(index) || !appearances[index]) return;
+    if (onIntervalClick) onIntervalClick(index);
+    event.preventDefault();
+
+    try {
+      trackEl.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events may not have an active pointer to capture.
+    }
+
+    dragState = {
+      pointerId: event.pointerId,
+      index,
+      kind: edge ? 'bound' : 'interval',
+      bound: edge ? edge.dataset.bound : null,
+      anchorTime: pointerTime(event.clientX),
+      original: { ...appearances[index] },
+      action: null,
+    };
+    document.body.classList.add('timeline-dragging');
+    window.addEventListener('pointermove', onIntervalPointerMove);
+    window.addEventListener('pointerup', onIntervalPointerUp);
+    window.addEventListener('pointercancel', onIntervalPointerCancel);
+    previewForDrag(event.clientX);
   }
 
   // --- Playhead ---
@@ -223,7 +358,7 @@ const Timeline = (() => {
     // empty track seek and clear the selection.
     const bar = e.target.closest('.interval');
     if (bar) {
-      if (onIntervalClick) onIntervalClick(Number(bar.dataset.index));
+      beginIntervalDrag(e, bar, e.target.closest('.interval-edge'));
       return;
     }
     if (onEmptyTrackClick) onEmptyTrackClick();
@@ -264,6 +399,8 @@ const Timeline = (() => {
 
   function clear() {
     stopPlayheadLoop();
+    if (dragState) cleanupDrag();
+    dragState = null;
     durationS = 0;
     pxPerSec = 0;
     appearances = [];
@@ -272,6 +409,7 @@ const Timeline = (() => {
     trackEl.querySelectorAll('.interval, .interval-overflow').forEach((el) => el.remove());
     playheadEl.hidden = true;
     playheadEl.style.left = '0px';
+    dragReadoutEl.hidden = true;
   }
 
   return {

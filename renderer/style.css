@@ -366,8 +366,41 @@ body {
   position: absolute;
   border-radius: 3px;
   border: 1px solid;
-  cursor: pointer;
+  cursor: grab;
   z-index: 1;
+  touch-action: none;
+}
+
+.interval:active,
+.timeline-dragging .interval.selected {
+  cursor: grabbing;
+}
+
+.interval-edge {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #111;
+  opacity: 0;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.interval-edge-start {
+  left: -1px;
+  border-radius: 3px 0 0 3px;
+}
+
+.interval-edge-end {
+  right: -1px;
+  border-radius: 0 3px 3px 0;
+}
+
+.interval:hover .interval-edge,
+.interval.selected .interval-edge {
+  opacity: 1;
 }
 
 .interval.bucket-high {
@@ -412,6 +445,24 @@ body {
   background: var(--text-dim);
   border-radius: 2px;
   z-index: 1;
+}
+
+.drag-readout {
+  position: absolute;
+  top: 42px;
+  transform: translateX(-50%);
+  min-width: 76px;
+  padding: 3px 6px;
+  color: #fff;
+  background: #111;
+  border: 1px solid var(--text-dim);
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 20;
 }
 
 #playhead {

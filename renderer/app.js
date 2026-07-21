@@ -23,7 +23,7 @@ const statusElapsed = document.getElementById('status-elapsed');
 const statusTokens = document.getElementById('status-tokens');
 const timelineEl = document.getElementById('timeline');
 
-// Shared selection state: index into currentDetections.appearances, or null.
+// Shared selection state: index into DetectionState, or null.
 // Timeline bars and panel cards both set it and both reflect it.
 let selectedAppearance = null;
 
@@ -42,6 +42,19 @@ Timeline.init(
   {
     onIntervalClick: (index) => setSelection(index),
     onEmptyTrackClick: () => setSelection(null),
+    onDragPreview: (preview, index) => {
+      Panel.render(preview);
+      Panel.setSelected(index);
+    },
+    onDragCommit: (action, index) => {
+      const result = DetectionState.updateDetections(action);
+      if (!result.ok || !result.changed) {
+        const detections = DetectionState.getDetections();
+        Timeline.setDetections(detections);
+        Panel.render(detections);
+        setSelection(index);
+      }
+    },
   }
 );
 
@@ -55,6 +68,16 @@ Panel.init(
   }
 );
 
+DetectionState.subscribe(({ detections }) => {
+  if (selectedAppearance !== null && selectedAppearance >= detections.length) {
+    selectedAppearance = null;
+  }
+  Timeline.setDetections(detections);
+  Panel.render(detections);
+  Timeline.handleResize();
+  setSelection(selectedAppearance);
+});
+
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') setSelection(null);
 });
@@ -62,6 +85,7 @@ window.addEventListener('keydown', (e) => {
 // Active project { name, path } and video { path, name, url }, null until chosen.
 let currentProject = null;
 let currentVideo = null;
+let fixtureAppearances = null;
 
 // Analysis run state
 let analysisRunning = false;
@@ -123,7 +147,8 @@ function exitToLanding() {
   videoPlayer.load();
   videoPlaceholder.textContent = 'Open a video to begin';
   videoPlaceholder.hidden = false;
-  currentDetections = null;
+  fixtureAppearances = null;
+  DetectionState.initialize([], 0);
   setSelection(null);
   timelineEl.hidden = true;
   Timeline.clear();
@@ -150,25 +175,31 @@ refreshProjectGrid();
 
 // TEMP Phase 3: replaced by real pipeline in Phase 5 — fixture data stands in
 // for analysis output. All times in the fixture are integer seconds.
-let currentDetections = null;
+function initializeFixtureWhenReady() {
+  if (!currentVideo || !fixtureAppearances || !Number.isFinite(videoPlayer.duration)) return;
+  DetectionState.initialize(fixtureAppearances, videoPlayer.duration);
+  setSelection(null);
+}
 
 async function loadFixtureDetections() {
   try {
     const res = await fetch('../fixtures/sample_detections.json');
-    currentDetections = await res.json();
+    const fixture = await res.json();
+    fixtureAppearances = fixture.appearances || [];
   } catch (err) {
     console.error('Failed to load fixture detections:', err);
-    currentDetections = null;
+    fixtureAppearances = [];
   }
-  setSelection(null);
-  Timeline.setDetections(currentDetections ? currentDetections.appearances : []);
-  Panel.render(currentDetections ? currentDetections.appearances : []);
+  initializeFixtureWhenReady();
 }
 
 // Shows `video` ({ path, name, url }) in the player and enables the buttons
 // that need a loaded video.
 function showVideo(video) {
   currentVideo = video;
+  fixtureAppearances = null;
+  DetectionState.initialize([], 0);
+  setSelection(null);
   videoName.textContent = video.name;
   videoPlayer.src = video.url;
   videoPlaceholder.hidden = true;
@@ -181,6 +212,7 @@ videoPlayer.addEventListener('loadedmetadata', () => {
   if (!currentVideo) return;
   timelineEl.hidden = false;
   Timeline.setVideo(videoPlayer.duration);
+  initializeFixtureWhenReady();
 });
 
 window.addEventListener('resize', () => Timeline.handleResize());

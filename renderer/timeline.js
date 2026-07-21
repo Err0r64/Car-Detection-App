@@ -8,6 +8,23 @@ const Timeline = (() => {
   const TICK_INTERVALS_S = [1, 5, 10, 30, 60];
   const MIN_TICK_SPACING_PX = 60;
 
+  // Confidence color buckets — the single source of truth, used by both the
+  // timeline bars and the Analysis Panel. Checked top-down.
+  const CONFIDENCE_BUCKETS = [
+    { min: 0.85, cls: 'bucket-high' },
+    { min: 0.6, cls: 'bucket-mid' },
+    { min: 0, cls: 'bucket-low' },
+  ];
+
+  function bucketFor(confidence) {
+    return CONFIDENCE_BUCKETS.find((b) => confidence >= b.min) || CONFIDENCE_BUCKETS[CONFIDENCE_BUCKETS.length - 1];
+  }
+
+  const MAX_LANES = 3;
+  const LANE_TOP_PX = 4;
+  const LANE_HEIGHT_PX = 19;
+  const BAR_HEIGHT_PX = 17;
+
   let rulerEl = null;
   let trackEl = null;
   let videoEl = null;
@@ -15,6 +32,7 @@ const Timeline = (() => {
   let durationS = 0;
   let pxPerSec = 0;
   let rafId = null;
+  let appearances = [];
 
   function init(els) {
     rulerEl = els.ruler;
@@ -80,6 +98,72 @@ const Timeline = (() => {
     }
   }
 
+  // --- Intervals ---
+
+  // Greedy lane assignment in start order: each appearance takes the first
+  // lane whose previous interval has ended. Returns lane index, or -1 for
+  // overflow past MAX_LANES.
+  function assignLanes(items) {
+    const laneEnds = [];
+    return items.map((a) => {
+      for (let lane = 0; lane < MAX_LANES; lane++) {
+        if (!(laneEnds[lane] > a.start_s)) {
+          laneEnds[lane] = a.end_s;
+          return lane;
+        }
+      }
+      return -1;
+    });
+  }
+
+  function renderIntervals() {
+    trackEl.querySelectorAll('.interval, .interval-overflow').forEach((el) => el.remove());
+    if (durationS <= 0 || appearances.length === 0) return;
+
+    const ordered = [...appearances].sort((a, b) => a.start_s - b.start_s);
+    const lanes = assignLanes(ordered);
+
+    ordered.forEach((a, i) => {
+      const left = timeToX(a.start_s);
+      const width = Math.max(timeToX(a.end_s) - left, 2);
+      const lane = lanes[i];
+      const label = `Car ${a.car_number} · ${formatMMSS(a.start_s)}–${formatMMSS(a.end_s)} · ${Math.round(a.confidence * 100)}%`;
+
+      if (lane === -1) {
+        // Overflow indicator: more intervals here than visible lanes.
+        const marker = document.createElement('div');
+        marker.className = 'interval-overflow';
+        marker.style.left = `${left}px`;
+        marker.style.width = `${width}px`;
+        marker.title = `More overlapping intervals than lanes — ${label}`;
+        trackEl.appendChild(marker);
+        return;
+      }
+
+      const bar = document.createElement('div');
+      bar.className = `interval ${bucketFor(a.confidence).cls}`;
+      if (a.subject === false) {
+        bar.classList.add('non-subject');
+        bar.title = `Non-subject appearance — ${label}`;
+      } else {
+        bar.title = label;
+      }
+      bar.dataset.index = String(appearances.indexOf(a));
+      bar.style.left = `${left}px`;
+      bar.style.width = `${width}px`;
+      bar.style.top = `${LANE_TOP_PX + lane * LANE_HEIGHT_PX}px`;
+      bar.style.height = `${BAR_HEIGHT_PX}px`;
+      trackEl.appendChild(bar);
+    });
+  }
+
+  // Sets the appearances rendered on the track (integer-second data straight
+  // from the fixture/pipeline; this module never mutates it).
+  function setDetections(list) {
+    appearances = Array.isArray(list) ? list : [];
+    renderIntervals();
+  }
+
   // --- Playhead ---
 
   function updatePlayhead() {
@@ -142,6 +226,7 @@ const Timeline = (() => {
   function setVideo(duration) {
     setScale(duration, trackEl.clientWidth);
     renderRuler();
+    renderIntervals();
     playheadEl.hidden = false;
     updatePlayhead();
   }
@@ -154,10 +239,23 @@ const Timeline = (() => {
     stopPlayheadLoop();
     durationS = 0;
     pxPerSec = 0;
+    appearances = [];
     rulerEl.textContent = '';
+    trackEl.querySelectorAll('.interval, .interval-overflow').forEach((el) => el.remove());
     playheadEl.hidden = true;
     playheadEl.style.left = '0px';
   }
 
-  return { init, setScale, timeToX, xToTime, formatMMSS, setVideo, handleResize, clear };
+  return {
+    init,
+    setScale,
+    timeToX,
+    xToTime,
+    formatMMSS,
+    bucketFor,
+    setDetections,
+    setVideo,
+    handleResize,
+    clear,
+  };
 })();

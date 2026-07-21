@@ -268,6 +268,59 @@ body {
   cursor: pointer;
 }
 
+/* Confidence buckets — colors shared by timeline bars and the Analysis Panel */
+:root {
+  --bucket-high: #2ea043;
+  --bucket-mid: #d29922;
+  --bucket-low: #f85149;
+}
+
+.interval {
+  position: absolute;
+  border-radius: 3px;
+  border: 1px solid;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.interval.bucket-high {
+  background: rgba(46, 160, 67, 0.3);
+  border-color: var(--bucket-high);
+}
+
+.interval.bucket-mid {
+  background: rgba(210, 153, 34, 0.3);
+  border-color: var(--bucket-mid);
+}
+
+.interval.bucket-low {
+  background: rgba(248, 81, 73, 0.3);
+  border-color: var(--bucket-low);
+}
+
+/* Non-subject appearances: desaturated + hatched so they read differently at
+   a glance regardless of confidence color */
+.interval.non-subject {
+  filter: saturate(0.35);
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.18) 0,
+    rgba(255, 255, 255, 0.18) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  border-style: dashed;
+}
+
+.interval-overflow {
+  position: absolute;
+  bottom: 2px;
+  height: 4px;
+  background: var(--text-dim);
+  border-radius: 2px;
+  z-index: 1;
+}
+
 #playhead {
   position: absolute;
   top: 0;

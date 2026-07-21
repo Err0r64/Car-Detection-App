@@ -128,6 +128,7 @@ async function loadFixtureDetections() {
     console.error('Failed to load fixture detections:', err);
     currentDetections = null;
   }
+  Timeline.setDetections(currentDetections ? currentDetections.appearances : []);
 }
 
 // Shows `video` ({ path, name, url }) in the player and enables the buttons

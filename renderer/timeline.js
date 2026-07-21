@@ -33,11 +33,16 @@ const Timeline = (() => {
   let pxPerSec = 0;
   let rafId = null;
   let appearances = [];
+  let selectedIndex = null;
+  let onIntervalClick = null;
+  let onEmptyTrackClick = null;
 
-  function init(els) {
+  function init(els, callbacks = {}) {
     rulerEl = els.ruler;
     trackEl = els.track;
     videoEl = els.video;
+    onIntervalClick = callbacks.onIntervalClick || null;
+    onEmptyTrackClick = callbacks.onEmptyTrackClick || null;
 
     playheadEl = document.createElement('div');
     playheadEl.id = 'playhead';
@@ -148,7 +153,9 @@ const Timeline = (() => {
       } else {
         bar.title = label;
       }
-      bar.dataset.index = String(appearances.indexOf(a));
+      const originalIndex = appearances.indexOf(a);
+      bar.dataset.index = String(originalIndex);
+      if (originalIndex === selectedIndex) bar.classList.add('selected');
       bar.style.left = `${left}px`;
       bar.style.width = `${width}px`;
       bar.style.top = `${LANE_TOP_PX + lane * LANE_HEIGHT_PX}px`;
@@ -161,7 +168,17 @@ const Timeline = (() => {
   // from the fixture/pipeline; this module never mutates it).
   function setDetections(list) {
     appearances = Array.isArray(list) ? list : [];
+    selectedIndex = null;
     renderIntervals();
+  }
+
+  // Highlights the bar for `index` (null clears). Selection state itself is
+  // owned by app.js.
+  function setSelected(index) {
+    selectedIndex = index;
+    trackEl.querySelectorAll('.interval').forEach((bar) => {
+      bar.classList.toggle('selected', index !== null && bar.dataset.index === String(index));
+    });
   }
 
   // --- Playhead ---
@@ -201,6 +218,16 @@ const Timeline = (() => {
 
   function onTrackPointerDown(e) {
     if (durationS <= 0 || e.button !== 0) return;
+
+    // Clicks on an interval bar select it instead of seeking; clicks on the
+    // empty track seek and clear the selection.
+    const bar = e.target.closest('.interval');
+    if (bar) {
+      if (onIntervalClick) onIntervalClick(Number(bar.dataset.index));
+      return;
+    }
+    if (onEmptyTrackClick) onEmptyTrackClick();
+
     try {
       trackEl.setPointerCapture(e.pointerId);
     } catch {
@@ -240,6 +267,7 @@ const Timeline = (() => {
     durationS = 0;
     pxPerSec = 0;
     appearances = [];
+    selectedIndex = null;
     rulerEl.textContent = '';
     trackEl.querySelectorAll('.interval, .interval-overflow').forEach((el) => el.remove());
     playheadEl.hidden = true;
@@ -254,6 +282,7 @@ const Timeline = (() => {
     formatMMSS,
     bucketFor,
     setDetections,
+    setSelected,
     setVideo,
     handleResize,
     clear,

@@ -23,10 +23,40 @@ const statusElapsed = document.getElementById('status-elapsed');
 const statusTokens = document.getElementById('status-tokens');
 const timelineEl = document.getElementById('timeline');
 
-Timeline.init({
-  ruler: document.getElementById('timeline-ruler'),
-  track: document.getElementById('timeline-track'),
-  video: videoPlayer,
+// Shared selection state: index into currentDetections.appearances, or null.
+// Timeline bars and panel cards both set it and both reflect it.
+let selectedAppearance = null;
+
+function setSelection(index) {
+  selectedAppearance = index;
+  Timeline.setSelected(index);
+  Panel.setSelected(index);
+}
+
+Timeline.init(
+  {
+    ruler: document.getElementById('timeline-ruler'),
+    track: document.getElementById('timeline-track'),
+    video: videoPlayer,
+  },
+  {
+    onIntervalClick: (index) => setSelection(index),
+    onEmptyTrackClick: () => setSelection(null),
+  }
+);
+
+Panel.init(
+  {
+    panel: document.getElementById('analysis-panel'),
+    list: document.getElementById('panel-list'),
+  },
+  {
+    onSelect: (index) => setSelection(index),
+  }
+);
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') setSelection(null);
 });
 
 // Active project { name, path } and video { path, name, url }, null until chosen.
@@ -94,8 +124,10 @@ function exitToLanding() {
   videoPlaceholder.textContent = 'Open a video to begin';
   videoPlaceholder.hidden = false;
   currentDetections = null;
+  setSelection(null);
   timelineEl.hidden = true;
   Timeline.clear();
+  Panel.clear();
   btnDetectVehicles.disabled = true;
   btnSaveChanges.disabled = true;
   btnExport.disabled = true;
@@ -128,7 +160,9 @@ async function loadFixtureDetections() {
     console.error('Failed to load fixture detections:', err);
     currentDetections = null;
   }
+  setSelection(null);
   Timeline.setDetections(currentDetections ? currentDetections.appearances : []);
+  Panel.render(currentDetections ? currentDetections.appearances : []);
 }
 
 // Shows `video` ({ path, name, url }) in the player and enables the buttons

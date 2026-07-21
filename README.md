@@ -1,44 +1,111 @@
-# Capstone Video Editor (Phase 2 scaffold)
+# Capstone Video Editor
 
-Desktop review-and-cut editor for AI-assisted motorsports video indexing (sponsor: Apexiel).
-Plain Electron + vanilla JS — no bundler, no framework. This phase ships the app shell,
-project picker, video playback, and a **stubbed** analysis pipeline; the real Gemini/ffmpeg
-pipeline arrives in later phases.
+Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
+
+Phase 2 established the secure Electron shell, project picker, local video playback, stubbed analysis process, and project save/load flow. Phase 3 CP1-CP4 add the fit-to-width timeline, seeking, detection intervals, and synchronized analysis panel. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
 
 ## Prerequisites
 
-- **Node.js LTS** (includes npm)
-- **Python 3** on PATH (the stubbed analysis pipeline spawns `python`)
+- Node.js LTS, including npm
+- Python 3 available as `python` on `PATH`
+
+The Python requirement currently supports the stubbed analysis pipeline. The real Gemini and ffmpeg pipeline will replace it in a later phase.
 
 ## Run
 
-```
+```powershell
 npm install
 npm start
 ```
 
-## Using the app
+## Application Flow
 
-1. **Landing screen** — click **New Project** and pick (or create) a project folder, or click
-   an existing project tile. The ✕ on a tile removes it from the list only; nothing on disk
-   is deleted. The project list is stored in Electron's userData folder (`projects.json`).
-2. **Editor** — click **Open Video** and pick an mp4/mov. The video plays with native
-   controls and **Detect Vehicles** / **Save Changes** enable.
-3. **Fake analysis flow** — click **Detect Vehicles**. The app spawns
-   `stub/fake_analysis.py`, which emits the five pipeline stages (`proxy`, `upload`,
-   `processing`, `analyzing`, `parsing`) as JSON lines on stdout (~2s per stage, live token
-   counts during `analyzing`). The status line shows the current stage, an elapsed timer,
-   token count, and a **Cancel** button that kills the child process.
-   - To test the failure path, launch with the env var `FAKE_ANALYSIS_FAIL=1`
-     (PowerShell: `$env:FAKE_ANALYSIS_FAIL=1; npm start`) — the stub exits nonzero
-     mid-run and the app shows an error dialog.
-4. **Save / load** — **Save Changes** writes a `.vproj.json` project file (placeholder
-   contents for now: `{ videoPath, detections: [], edits: {} }`); **Load Project** reads one
-   back and restores the video.
+1. On the project selection screen, choose **New Project** and select a project folder, or open an existing project tile.
+2. To remove a tile, use its delete control. This only unregisters the project from the landing screen; it does not delete the project folder or any files on disk.
+3. In the editor, select **Open Video** and choose an MP4 or MOV file. The filename, native video controls, analysis panel, and timeline appear after the video metadata loads.
+4. Select **Projects** to unload the current video and return to project selection.
 
-## Layout
+The project registry is stored as `projects.json` in Electron's user data directory.
 
-- `main.js` — Electron main process: window, dialogs, project registry, stub spawning/relay
-- `preload.js` — `contextBridge` IPC surface (`window.editorAPI`); the renderer has no Node access
-- `renderer/` — vanilla HTML/CSS/JS UI (landing + editor views)
-- `stub/fake_analysis.py` — fake analysis pipeline used by Detect Vehicles
+## Stubbed Analysis
+
+Select **Detect Vehicles** to start `stub/fake_analysis.py`. The process emits JSON Lines events for five simulated stages:
+
+1. `proxy`
+2. `upload`
+3. `processing`
+4. `analyzing`
+5. `parsing`
+
+The editor displays the current stage, elapsed time, live token count during analysis, and a **Cancel** control. Canceling terminates the Python child process.
+
+To test the visible failure path in PowerShell:
+
+```powershell
+$env:FAKE_ANALYSIS_FAIL = '1'
+npm start
+Remove-Item Env:FAKE_ANALYSIS_FAIL
+```
+
+## Timeline Core
+
+After a video loads, the editor displays a fit-to-width timeline beneath the player:
+
+- The ruler uses one shared time-to-pixel mapping and selects readable tick spacing for the available width.
+- A white playhead follows video playback.
+- Clicking empty track space seeks to that time and clears the current selection.
+- Pressing and dragging across the track scrubs the video.
+- Detection appearances render as intervals positioned from `start_s` to `end_s`.
+- Overlapping intervals use separate lanes so each remains selectable.
+- Confidence colors use one shared mapping: green at 0.85 or higher, amber from 0.60 through 0.84, and red below 0.60.
+- Non-subject appearances use a distinct hatched and dashed treatment.
+
+Timeline zoom and horizontal scrolling are not implemented yet; that work is deferred from Phase 3 CP5.
+
+## Analysis Panel
+
+The read-only Analysis panel lists each appearance in chronological order with its time range, car number, description, subject status, and confidence.
+
+- Selecting a timeline interval highlights the matching panel card.
+- Selecting a panel card highlights the matching timeline interval and scrolls the card into view.
+- Only one appearance can be selected at a time.
+- Click empty timeline space or press `Escape` to clear the selection.
+
+## Temporary Detection Fixture
+
+Phase 3 uses `fixtures/sample_detections.json` as temporary renderer-side analysis output. The renderer fetches this file after a video is opened and passes its `appearances` array to the timeline and Analysis panel.
+
+The fixture deliberately includes:
+
+- Five appearances with integer-second boundaries
+- Confidence values covering all three color buckets
+- One non-subject appearance
+- One overlapping pair for lane testing
+
+This pathway is marked temporary in `renderer/app.js` and is scheduled to be replaced by real pipeline output in Phase 5. Editing the fixture and reopening the video is the current way to test alternate detection data.
+
+## Project Save and Load
+
+**Save Changes** writes a `.vproj.json` file. **Load Project** reads one and restores its referenced video. The current project payload remains a placeholder:
+
+```json
+{
+  "videoPath": "C:\\path\\to\\video.mp4",
+  "detections": [],
+  "edits": {}
+}
+```
+
+## Project Layout
+
+- `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
+- `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
+- `renderer/index.html` - project selection and editor markup
+- `renderer/app.js` - renderer application state and view coordination
+- `renderer/timeline.js` - ruler, time mapping, playhead, seeking, interval layout, and timeline selection
+- `renderer/panel.js` - Analysis panel rendering and selection state
+- `renderer/style.css` - application, timeline, and panel styles
+- `fixtures/sample_detections.json` - temporary Phase 3 detection data
+- `stub/fake_analysis.py` - simulated analysis pipeline
+
+The renderer has no direct Node.js access; privileged operations remain behind the preload IPC boundary.

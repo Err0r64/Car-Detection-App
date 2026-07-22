@@ -65,6 +65,15 @@ function restoreDeletedAppearance() {
   return true;
 }
 
+function editAppearanceField(index, field, value) {
+  return DetectionState.updateDetections({
+    type: 'edit-field',
+    index,
+    field,
+    value,
+  });
+}
+
 function createAppearance(bounds) {
   const result = DetectionState.updateDetections({
     type: 'create',
@@ -118,6 +127,7 @@ Panel.init(
   },
   {
     onSelect: (index) => setSelection(index),
+    onEdit: editAppearanceField,
   }
 );
 

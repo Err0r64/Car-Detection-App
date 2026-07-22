@@ -68,8 +68,8 @@ const DetectionState = (() => {
     if (!Number.isInteger(start) || !Number.isInteger(end)) {
       return 'Times must be whole seconds.';
     }
-    if (start < 0 || end > durationS) {
-      return `Times must be between 0 and ${durationS} seconds.`;
+    if (start < 0 || start > durationS || end < 0 || end > durationS) {
+      return `Times must be between 0:00 and ${Math.floor(durationS / 60)}:${String(durationS % 60).padStart(2, '0')}.`;
     }
     if (start >= end) return 'Start must be at least one second before end.';
     return null;

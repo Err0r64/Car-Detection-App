@@ -260,7 +260,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 10px 12px;
-  cursor: pointer;
+  cursor: default;
 }
 
 .appearance-card:hover {
@@ -313,6 +313,76 @@ body {
   color: var(--text-dim);
   border: 1px dashed var(--text-dim);
   border-radius: 3px;
+}
+
+.card-time-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.card-field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.card-field-label {
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.card-field-control {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 4px 7px;
+  color: var(--text);
+  background: #181818;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.card-field-control:hover {
+  border-color: var(--text-dim);
+}
+
+.card-field-control:focus {
+  border-color: var(--accent-hover);
+  outline: 1px solid var(--accent-hover);
+}
+
+.card-field-control[aria-invalid="true"] {
+  border-color: var(--bucket-low);
+  outline-color: var(--bucket-low);
+}
+
+.card-subject-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.card-subject-input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent-hover);
+}
+
+.card-error {
+  margin-top: 6px;
+  color: var(--bucket-low);
+  font-size: 11px;
+  line-height: 1.25;
 }
 
 /* --- Timeline --- */

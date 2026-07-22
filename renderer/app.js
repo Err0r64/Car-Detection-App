@@ -168,9 +168,31 @@ let currentVideo = null;
 let fixtureAppearances = null;
 let pendingProjectLoad = null;
 let saveInProgress = false;
+let navigationInProgress = false;
 
 function updateSaveButton(dirty = DetectionState.isDirty()) {
   btnSaveChanges.disabled = saveInProgress || !currentVideo || !dirty;
+}
+
+function setNavigationInProgress(inProgress) {
+  navigationInProgress = inProgress;
+  btnOpenVideo.disabled = inProgress || analysisRunning;
+  btnLoadProject.disabled = inProgress;
+  btnBackToProjects.disabled = inProgress;
+}
+
+async function resolveUnsavedChanges(destination) {
+  if (!DetectionState.isDirty()) return true;
+
+  const action = await window.editorAPI.confirmUnsavedChanges(
+    currentVideo?.name,
+    destination
+  );
+  if (action === 'discard') return true;
+  if (action !== 'save') return false;
+
+  const saved = await saveCurrentProject();
+  return saved && !DetectionState.isDirty();
 }
 
 // Analysis run state
@@ -256,7 +278,15 @@ btnNewProject.addEventListener('click', async () => {
   if (project) enterEditor(project);
 });
 
-btnBackToProjects.addEventListener('click', exitToLanding);
+btnBackToProjects.addEventListener('click', async () => {
+  if (navigationInProgress) return;
+  setNavigationInProgress(true);
+  try {
+    if (await resolveUnsavedChanges('projects')) exitToLanding();
+  } finally {
+    setNavigationInProgress(false);
+  }
+});
 
 refreshProjectGrid();
 
@@ -325,8 +355,15 @@ videoPlayer.addEventListener('loadedmetadata', () => {
 window.addEventListener('resize', () => Timeline.handleResize());
 
 btnOpenVideo.addEventListener('click', async () => {
-  const result = await window.editorAPI.openVideo();
-  if (result) showVideo(result);
+  if (analysisRunning || navigationInProgress) return;
+  setNavigationInProgress(true);
+  try {
+    if (!await resolveUnsavedChanges('video')) return;
+    const result = await window.editorAPI.openVideo();
+    if (result) showVideo(result);
+  } finally {
+    setNavigationInProgress(false);
+  }
 });
 
 // --- Project save/load (.vproj.json) ---
@@ -363,7 +400,7 @@ async function saveCurrentProject() {
     statusElapsed.textContent = '';
     statusTokens.textContent = '';
     statusLine.hidden = false;
-    return true;
+    return !DetectionState.isDirty();
   } finally {
     saveInProgress = false;
     updateSaveButton();
@@ -373,19 +410,25 @@ async function saveCurrentProject() {
 btnSaveChanges.addEventListener('click', saveCurrentProject);
 
 btnLoadProject.addEventListener('click', async () => {
-  if (analysisRunning) return;
-  const result = await window.editorAPI.loadProject();
-  if (!result) return;
-  const { project, videoUrl, filePath } = result;
-  const name = project.videoPath.split(/[\\/]/).pop();
-  showVideo(
-    { path: project.videoPath, name, url: videoUrl },
-    { detections: project.detections, projectFilePath: filePath }
-  );
-  statusStage.textContent = `Loaded project (${project.detections.length} detections)`;
-  statusElapsed.textContent = '';
-  statusTokens.textContent = '';
-  statusLine.hidden = false;
+  if (analysisRunning || navigationInProgress) return;
+  setNavigationInProgress(true);
+  try {
+    if (!await resolveUnsavedChanges('project')) return;
+    const result = await window.editorAPI.loadProject();
+    if (!result) return;
+    const { project, videoUrl, filePath } = result;
+    const name = project.videoPath.split(/[\\/]/).pop();
+    showVideo(
+      { path: project.videoPath, name, url: videoUrl },
+      { detections: project.detections, projectFilePath: filePath }
+    );
+    statusStage.textContent = `Loaded project (${project.detections.length} detections)`;
+    statusElapsed.textContent = '';
+    statusTokens.textContent = '';
+    statusLine.hidden = false;
+  } finally {
+    setNavigationInProgress(false);
+  }
 });
 
 videoPlayer.addEventListener('error', () => {
@@ -405,7 +448,7 @@ function endAnalysisRun() {
     elapsedTimer = null;
   }
   btnCancel.hidden = true;
-  btnOpenVideo.disabled = false;
+  btnOpenVideo.disabled = navigationInProgress;
   btnDetectVehicles.disabled = !currentVideo;
 }
 

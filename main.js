@@ -82,6 +82,30 @@ ipcMain.handle('open-video', async (event) => {
   return { path: filePath, name: path.basename(filePath), url: pathToFileURL(filePath).href };
 });
 
+ipcMain.handle('confirm-unsaved-changes', async (event, videoName, destination) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const displayName = typeof videoName === 'string' && videoName
+    ? videoName
+    : 'the current video';
+  const destinationLabels = {
+    video: 'opening another video',
+    project: 'loading another project',
+    projects: 'returning to Projects',
+  };
+  const destinationLabel = destinationLabels[destination] || 'continuing';
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'warning',
+    title: 'Unsaved Changes',
+    message: `Save changes to "${displayName}" before ${destinationLabel}?`,
+    detail: 'Discarding will permanently lose the unsaved metadata edits.',
+    buttons: ['Save', 'Discard', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+  });
+  return ['save', 'discard', 'cancel'][response] || 'cancel';
+});
+
 // --- Project save/load (.vproj.json) ---
 
 const PROJECT_FILE_FILTERS = [{ name: 'Video Project', extensions: ['vproj.json'] }];

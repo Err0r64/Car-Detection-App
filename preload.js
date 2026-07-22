@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('editorAPI', {
 
   // Editor
   openVideo: () => ipcRenderer.invoke('open-video'),
+  confirmUnsavedChanges: (videoName, destination) =>
+    ipcRenderer.invoke('confirm-unsaved-changes', videoName, destination),
   startAnalysis: (videoPath) => ipcRenderer.invoke('start-analysis', videoPath),
   cancelAnalysis: () => ipcRenderer.send('cancel-analysis'),
   onAnalysisEvent: (callback) => ipcRenderer.on('analysis-event', (e, data) => callback(data)),

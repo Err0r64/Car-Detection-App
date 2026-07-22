@@ -2,7 +2,7 @@
 
 Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
 
-Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 CP1-CP4 add interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, and real project persistence. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
+Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
 
 ## Prerequisites
 
@@ -113,7 +113,9 @@ This pathway is marked temporary in `renderer/app.js` and is scheduled to be rep
 }
 ```
 
-The isolated preload API exposes `saveProject({ project, filePath, projectDirectory })` and `loadProject()`. `filePath` is null for the first save and is reused for silent overwrite; a successful load returns `{ project, filePath, videoUrl }`. The Open Video unsaved-changes prompt is scheduled for Phase 4 CP5.
+When **Open Video**, **Load Project**, or **Projects** is selected with dirty metadata, a native prompt offers **Save**, **Discard**, and **Cancel**. Save must complete before navigation continues; cancelling or failing that save keeps the current video and edits. Discard proceeds without writing, Cancel changes nothing, and clean state bypasses the prompt. If a file picker is cancelled after choosing Discard, the current dirty state remains intact because navigation did not complete.
+
+The isolated preload API exposes `saveProject({ project, filePath, projectDirectory })`, `loadProject()`, and `confirmUnsavedChanges(videoName, destination)`. `filePath` is null for the first save and is reused for silent overwrite; a successful load returns `{ project, filePath, videoUrl }`. The prompt destination is `video`, `project`, or `projects` so the native message identifies the pending navigation.
 
 ## Project Layout
 

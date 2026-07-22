@@ -12,6 +12,6 @@ contextBridge.exposeInMainWorld('editorAPI', {
   startAnalysis: (videoPath) => ipcRenderer.invoke('start-analysis', videoPath),
   cancelAnalysis: () => ipcRenderer.send('cancel-analysis'),
   onAnalysisEvent: (callback) => ipcRenderer.on('analysis-event', (e, data) => callback(data)),
-  saveProject: (projectObj) => ipcRenderer.invoke('save-project', projectObj),
+  saveProject: (request) => ipcRenderer.invoke('save-project', request),
   loadProject: () => ipcRenderer.invoke('load-project'),
 });

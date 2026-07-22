@@ -86,18 +86,78 @@ ipcMain.handle('open-video', async (event) => {
 
 const PROJECT_FILE_FILTERS = [{ name: 'Video Project', extensions: ['vproj.json'] }];
 
-ipcMain.handle('save-project', async (event, projectObj) => {
+function validateProjectFile(project) {
+  if (!project || typeof project !== 'object' || Array.isArray(project)) {
+    return 'The project file must contain a JSON object.';
+  }
+  if (project.version !== 1) return 'Only project file version 1 is supported.';
+  if (typeof project.videoPath !== 'string' || project.videoPath.length === 0) {
+    return 'The project file does not reference a video.';
+  }
+  if (!Number.isInteger(project.videoDurationS) || project.videoDurationS < 1) {
+    return 'The project video duration must be a positive whole number of seconds.';
+  }
+  if (!Array.isArray(project.detections)) return 'The project detections must be an array.';
+
+  for (let index = 0; index < project.detections.length; index += 1) {
+    const item = project.detections[index];
+    const validConfidence = item && (
+      item.confidence === null || (
+        Number.isFinite(item.confidence) && item.confidence >= 0 && item.confidence <= 1
+      )
+    );
+    const valid = item
+      && typeof item === 'object'
+      && !Array.isArray(item)
+      && typeof item.car_number === 'string'
+      && Number.isInteger(item.start_s)
+      && Number.isInteger(item.end_s)
+      && item.start_s >= 0
+      && item.start_s < item.end_s
+      && item.end_s <= project.videoDurationS
+      && typeof item.subject === 'boolean'
+      && validConfidence
+      && typeof item.notes === 'string';
+    if (!valid) return `Detection ${index + 1} is not schema-conformant.`;
+  }
+
+  if (typeof project.savedAt !== 'string' || Number.isNaN(Date.parse(project.savedAt))) {
+    return 'The project savedAt value must be a valid timestamp.';
+  }
+  return null;
+}
+
+ipcMain.handle('save-project', async (event, request) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  const result = await dialog.showSaveDialog(win, {
-    title: 'Save Project',
-    filters: PROJECT_FILE_FILTERS,
-    defaultPath: 'project.vproj.json',
-  });
-  if (result.canceled || !result.filePath) return null;
+  const project = request && request.project;
+  const validationError = validateProjectFile(project);
+  if (validationError) {
+    dialog.showErrorBox('Save failed', validationError);
+    return null;
+  }
+
+  let filePath = typeof request.filePath === 'string' && request.filePath
+    ? request.filePath
+    : null;
+  if (!filePath) {
+    const projectDirectory = typeof request.projectDirectory === 'string'
+      ? request.projectDirectory
+      : '';
+    const defaultPath = projectDirectory
+      ? path.join(projectDirectory, `${path.basename(projectDirectory)}.vproj.json`)
+      : 'project.vproj.json';
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Save Project',
+      filters: PROJECT_FILE_FILTERS,
+      defaultPath,
+    });
+    if (result.canceled || !result.filePath) return null;
+    filePath = result.filePath;
+  }
 
   try {
-    fs.writeFileSync(result.filePath, JSON.stringify(projectObj, null, 2));
-    return result.filePath;
+    fs.writeFileSync(filePath, JSON.stringify(project, null, 2));
+    return filePath;
   } catch (err) {
     dialog.showErrorBox('Save failed', `Could not write project file:\n${err.message}`);
     return null;
@@ -113,15 +173,24 @@ ipcMain.handle('load-project', async (event) => {
   });
   if (result.canceled || result.filePaths.length === 0) return null;
 
+  const filePath = result.filePaths[0];
   try {
-    const project = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf8'));
-    // videoUrl accompanies the project so the renderer can restore playback;
-    // it is derived, not part of the saved file.
-    const videoUrl =
-      typeof project.videoPath === 'string' && project.videoPath
-        ? pathToFileURL(project.videoPath).href
-        : null;
-    return { project, videoUrl };
+    const project = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    const validationError = validateProjectFile(project);
+    if (validationError) throw new Error(validationError);
+    if (!fs.existsSync(project.videoPath) || !fs.statSync(project.videoPath).isFile()) {
+      dialog.showErrorBox(
+        'Video file missing',
+        `The project video could not be found:\n${project.videoPath}`
+      );
+      return null;
+    }
+
+    return {
+      project,
+      filePath,
+      videoUrl: pathToFileURL(project.videoPath).href,
+    };
   } catch (err) {
     dialog.showErrorBox('Load failed', `Could not read project file:\n${err.message}`);
     return null;

@@ -131,7 +131,7 @@ Panel.init(
   }
 );
 
-DetectionState.subscribe(({ detections }) => {
+DetectionState.subscribe(({ detections, dirty }) => {
   if (selectedAppearance !== null && selectedAppearance >= detections.length) {
     selectedAppearance = null;
   }
@@ -139,6 +139,7 @@ DetectionState.subscribe(({ detections }) => {
   Panel.render(detections);
   Timeline.handleResize();
   setSelection(selectedAppearance);
+  updateSaveButton(dirty);
 });
 
 window.addEventListener('keydown', (e) => {
@@ -162,8 +163,15 @@ window.addEventListener('keydown', (e) => {
 
 // Active project { name, path } and video { path, name, url }, null until chosen.
 let currentProject = null;
+let currentProjectFilePath = null;
 let currentVideo = null;
 let fixtureAppearances = null;
+let pendingProjectLoad = null;
+let saveInProgress = false;
+
+function updateSaveButton(dirty = DetectionState.isDirty()) {
+  btnSaveChanges.disabled = saveInProgress || !currentVideo || !dirty;
+}
 
 // Analysis run state
 let analysisRunning = false;
@@ -219,7 +227,10 @@ function exitToLanding() {
   if (analysisRunning) window.editorAPI.cancelAnalysis();
   endAnalysisRun();
   currentProject = null;
+  currentProjectFilePath = null;
   currentVideo = null;
+  pendingProjectLoad = null;
+  saveInProgress = false;
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
@@ -254,8 +265,21 @@ refreshProjectGrid();
 // TEMP Phase 3: replaced by real pipeline in Phase 5 — fixture data stands in
 // for analysis output. All times in the fixture are integer seconds.
 function initializeFixtureWhenReady() {
-  if (!currentVideo || !fixtureAppearances || !Number.isFinite(videoPlayer.duration)) return;
+  if (
+    pendingProjectLoad
+    || !currentVideo
+    || !fixtureAppearances
+    || !Number.isFinite(videoPlayer.duration)
+  ) return;
   DetectionState.initialize(fixtureAppearances, videoPlayer.duration);
+  setSelection(null);
+}
+
+function initializeProjectWhenReady() {
+  if (!pendingProjectLoad || !currentVideo || !Number.isFinite(videoPlayer.duration)) return;
+  const project = pendingProjectLoad;
+  pendingProjectLoad = null;
+  DetectionState.initialize(project.detections, videoPlayer.duration);
   setSelection(null);
 }
 
@@ -273,23 +297,28 @@ async function loadFixtureDetections() {
 
 // Shows `video` ({ path, name, url }) in the player and enables the buttons
 // that need a loaded video.
-function showVideo(video) {
+function showVideo(video, options = {}) {
   currentVideo = video;
+  currentProjectFilePath = options.projectFilePath || null;
   fixtureAppearances = null;
+  pendingProjectLoad = Array.isArray(options.detections)
+    ? { detections: options.detections }
+    : null;
   DetectionState.initialize([], 0);
   setSelection(null);
   videoName.textContent = video.name;
   videoPlayer.src = video.url;
   videoPlaceholder.hidden = true;
   btnDetectVehicles.disabled = false;
-  btnSaveChanges.disabled = false;
-  loadFixtureDetections();
+  updateSaveButton(false);
+  if (!pendingProjectLoad) loadFixtureDetections();
 }
 
 videoPlayer.addEventListener('loadedmetadata', () => {
   if (!currentVideo) return;
   timelineEl.hidden = false;
   Timeline.setVideo(videoPlayer.duration);
+  initializeProjectWhenReady();
   initializeFixtureWhenReady();
 });
 
@@ -300,33 +329,60 @@ btnOpenVideo.addEventListener('click', async () => {
   if (result) showVideo(result);
 });
 
-// --- Project save/load (placeholder project object) ---
+// --- Project save/load (.vproj.json) ---
 
-btnSaveChanges.addEventListener('click', async () => {
-  const projectObj = {
-    videoPath: currentVideo ? currentVideo.path : null,
-    detections: [],
-    edits: {},
+async function saveCurrentProject() {
+  if (!currentVideo || !DetectionState.isDirty() || saveInProgress) return false;
+
+  const project = {
+    version: 1,
+    videoPath: currentVideo.path,
+    videoDurationS: Math.floor(videoPlayer.duration),
+    detections: DetectionState.getDetections(),
+    savedAt: new Date().toISOString(),
   };
-  const savedPath = await window.editorAPI.saveProject(projectObj);
-  if (savedPath) {
+  const savedState = JSON.stringify(project.detections);
+  const savedVideoPath = currentVideo.path;
+  saveInProgress = true;
+  updateSaveButton();
+
+  try {
+    const savedPath = await window.editorAPI.saveProject({
+      project,
+      filePath: currentProjectFilePath,
+      projectDirectory: currentProject ? currentProject.path : null,
+    });
+    if (!savedPath) return false;
+
+    currentProjectFilePath = savedPath;
+    const stateUnchanged = currentVideo
+      && currentVideo.path === savedVideoPath
+      && JSON.stringify(DetectionState.getDetections()) === savedState;
+    if (stateUnchanged) DetectionState.markClean();
     statusStage.textContent = `Saved ${savedPath}`;
     statusElapsed.textContent = '';
     statusTokens.textContent = '';
     statusLine.hidden = false;
+    return true;
+  } finally {
+    saveInProgress = false;
+    updateSaveButton();
   }
-});
+}
+
+btnSaveChanges.addEventListener('click', saveCurrentProject);
 
 btnLoadProject.addEventListener('click', async () => {
   if (analysisRunning) return;
   const result = await window.editorAPI.loadProject();
   if (!result) return;
-  const { project, videoUrl } = result;
-  if (project.videoPath && videoUrl) {
-    const name = project.videoPath.split(/[\\/]/).pop();
-    showVideo({ path: project.videoPath, name, url: videoUrl });
-  }
-  statusStage.textContent = `Loaded project (${(project.detections || []).length} detections)`;
+  const { project, videoUrl, filePath } = result;
+  const name = project.videoPath.split(/[\\/]/).pop();
+  showVideo(
+    { path: project.videoPath, name, url: videoUrl },
+    { detections: project.detections, projectFilePath: filePath }
+  );
+  statusStage.textContent = `Loaded project (${project.detections.length} detections)`;
   statusElapsed.textContent = '';
   statusTokens.textContent = '';
   statusLine.hidden = false;

@@ -2,7 +2,7 @@
 
 Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
 
-Phase 2 established the secure Electron shell, project picker, local video playback, stubbed analysis process, and project save/load flow. Phase 3 CP1-CP4 add the fit-to-width timeline, seeking, detection intervals, and synchronized analysis panel. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
+Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 CP1-CP4 add interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, and real project persistence. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
 
 ## Prerequisites
 
@@ -56,6 +56,8 @@ After a video loads, the editor displays a fit-to-width timeline beneath the pla
 - Clicking empty track space seeks to that time and clears the current selection.
 - Pressing and dragging across the track scrubs the video.
 - Detection appearances render as intervals positioned from `start_s` to `end_s`.
+- Drag either interval edge to change one bound, or drag the interval body to move both bounds while preserving its length.
+- Drag empty track space to create an appearance. Use `Ctrl+X` or the interval context menu to delete the selection; `Ctrl+Z` restores recently deleted intervals when focus is outside a text field.
 - Overlapping intervals use separate lanes so each remains selectable.
 - Confidence colors use one shared mapping: green at 0.85 or higher, amber from 0.60 through 0.84, and red below 0.60.
 - Non-subject appearances use a distinct hatched and dashed treatment.
@@ -64,8 +66,10 @@ Timeline zoom and horizontal scrolling are not implemented yet; that work is def
 
 ## Analysis Panel
 
-The read-only Analysis panel lists each appearance in chronological order with its time range, car number, description, subject status, and confidence.
+The Analysis panel lists each appearance in chronological order. Start, end, car number, vehicle description, and subject status are editable; confidence remains read-only.
 
+- Start and end use `MM:SS`, validate against the video duration, and update the timeline immediately.
+- Vehicle Description has an expand control for multiline editing in a larger dialog.
 - Selecting a timeline interval highlights the matching panel card.
 - Selecting a panel card highlights the matching timeline interval and scrolls the card into view.
 - Only one appearance can be selected at a time.
@@ -86,15 +90,30 @@ This pathway is marked temporary in `renderer/app.js` and is scheduled to be rep
 
 ## Project Save and Load
 
-**Save Changes** writes a `.vproj.json` file. **Load Project** reads one and restores its referenced video. The current project payload remains a placeholder:
+**Save Changes** is disabled after loading and enables after the first successful edit. The first save opens a native save dialog; later saves silently overwrite that selected `.vproj.json` file. A successful save marks the detection state clean and disables the button again. Saving writes metadata only and never modifies the referenced video.
+
+**Load Project** validates the project file, verifies that its video still exists, reopens that video, restores all detections, and starts with a clean state. Project files use this versioned format:
 
 ```json
 {
+  "version": 1,
   "videoPath": "C:\\path\\to\\video.mp4",
-  "detections": [],
-  "edits": {}
+  "videoDurationS": 114,
+  "detections": [
+    {
+      "car_number": "27/72",
+      "start_s": 8,
+      "end_s": 22,
+      "subject": true,
+      "confidence": 0.93,
+      "notes": "Red car entering from camera left"
+    }
+  ],
+  "savedAt": "2026-07-22T05:31:14.084Z"
 }
 ```
+
+The isolated preload API exposes `saveProject({ project, filePath, projectDirectory })` and `loadProject()`. `filePath` is null for the first save and is reused for silent overwrite; a successful load returns `{ project, filePath, videoUrl }`. The Open Video unsaved-changes prompt is scheduled for Phase 4 CP5.
 
 ## Project Layout
 

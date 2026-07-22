@@ -292,6 +292,7 @@ body {
 .card-confidence.bucket-high { color: var(--bucket-high); }
 .card-confidence.bucket-mid  { color: var(--bucket-mid); }
 .card-confidence.bucket-low  { color: var(--bucket-low); }
+.card-confidence.bucket-user { color: var(--bucket-user); }
 
 .card-times {
   font-size: 12px;
@@ -360,6 +361,7 @@ body {
   --bucket-high: #2ea043;
   --bucket-mid: #d29922;
   --bucket-low: #f85149;
+  --bucket-user: #a7adb7;
 }
 
 .interval {
@@ -418,6 +420,11 @@ body {
   border-color: var(--bucket-low);
 }
 
+.interval.bucket-user {
+  background: rgba(167, 173, 183, 0.3);
+  border-color: var(--bucket-user);
+}
+
 /* Non-subject appearances: desaturated + hatched so they read differently at
    a glance regardless of confidence color */
 .interval.non-subject {
@@ -436,6 +443,17 @@ body {
   outline: 2px solid #fff;
   outline-offset: -1px;
   z-index: 2;
+}
+
+.interval-create-preview {
+  position: absolute;
+  top: 4px;
+  height: 55px;
+  background: rgba(167, 173, 183, 0.22);
+  border: 1px dashed var(--bucket-user);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 8;
 }
 
 .interval-overflow {
@@ -463,6 +481,41 @@ body {
   white-space: nowrap;
   pointer-events: none;
   z-index: 20;
+}
+
+.timeline-context-menu {
+  position: fixed;
+  min-width: 150px;
+  padding: 4px;
+  background: #202020;
+  border: 1px solid #555;
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  z-index: 1000;
+}
+
+.timeline-context-menu button {
+  width: 100%;
+  padding: 7px 10px;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.timeline-context-menu button:hover,
+.timeline-context-menu button:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  outline: none;
+}
+
+.appearance-card:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 1px;
 }
 
 #playhead {

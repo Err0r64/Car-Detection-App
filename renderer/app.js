@@ -33,6 +33,48 @@ function setSelection(index) {
   Panel.setSelected(index);
 }
 
+function isTextEntry(target) {
+  if (!(target instanceof Element)) return false;
+  if (target.closest('textarea, [contenteditable="true"]')) return true;
+  const input = target.closest('input');
+  return input !== null && !['button', 'checkbox', 'radio', 'range', 'submit'].includes(input.type);
+}
+
+function deleteAppearance(index = selectedAppearance) {
+  if (!Number.isInteger(index)) return false;
+
+  const previousSelection = selectedAppearance;
+  selectedAppearance = null;
+  const result = DetectionState.updateDetections({ type: 'delete', index });
+  if (!result.ok) {
+    selectedAppearance = previousSelection;
+    setSelection(previousSelection);
+    return false;
+  }
+
+  setSelection(null);
+  return true;
+}
+
+function createAppearance(bounds) {
+  const result = DetectionState.updateDetections({
+    type: 'create',
+    appearance: {
+      start_s: bounds.start_s,
+      end_s: bounds.end_s,
+      car_number: '',
+      subject: true,
+      confidence: null,
+      notes: '',
+    },
+  });
+  if (!result.ok) return;
+
+  const newIndex = result.detections.length - 1;
+  setSelection(newIndex);
+  Panel.focusFirstField(newIndex);
+}
+
 Timeline.init(
   {
     ruler: document.getElementById('timeline-ruler'),
@@ -55,6 +97,8 @@ Timeline.init(
         setSelection(index);
       }
     },
+    onCreateCommit: createAppearance,
+    onDeleteRequest: deleteAppearance,
   }
 );
 
@@ -79,7 +123,17 @@ DetectionState.subscribe(({ detections }) => {
 });
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') setSelection(null);
+  if (e.key === 'Escape') {
+    setSelection(null);
+    return;
+  }
+
+  if (e.ctrlKey && e.key.toLowerCase() === 'x' && !isTextEntry(e.target)) {
+    if (selectedAppearance !== null) {
+      e.preventDefault();
+      deleteAppearance();
+    }
+  }
 });
 
 // Active project { name, path } and video { path, name, url }, null until chosen.

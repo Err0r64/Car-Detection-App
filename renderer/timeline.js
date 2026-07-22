@@ -17,6 +17,7 @@ const Timeline = (() => {
   ];
 
   function bucketFor(confidence) {
+    if (confidence === null || confidence === undefined) return { cls: 'bucket-user' };
     return CONFIDENCE_BUCKETS.find((b) => confidence >= b.min) || CONFIDENCE_BUCKETS[CONFIDENCE_BUCKETS.length - 1];
   }
 
@@ -24,22 +25,28 @@ const Timeline = (() => {
   const LANE_TOP_PX = 4;
   const LANE_HEIGHT_PX = 19;
   const BAR_HEIGHT_PX = 17;
+  const CREATE_DRAG_THRESHOLD_PX = 4;
 
   let rulerEl = null;
   let trackEl = null;
   let videoEl = null;
   let playheadEl = null;
   let dragReadoutEl = null;
+  let createPreviewEl = null;
+  let contextMenuEl = null;
   let durationS = 0;
   let pxPerSec = 0;
   let rafId = null;
   let appearances = [];
   let selectedIndex = null;
   let dragState = null;
+  let createState = null;
   let onIntervalClick = null;
   let onEmptyTrackClick = null;
   let onDragPreview = null;
   let onDragCommit = null;
+  let onCreateCommit = null;
+  let onDeleteRequest = null;
 
   function init(els, callbacks = {}) {
     rulerEl = els.ruler;
@@ -49,6 +56,8 @@ const Timeline = (() => {
     onEmptyTrackClick = callbacks.onEmptyTrackClick || null;
     onDragPreview = callbacks.onDragPreview || null;
     onDragCommit = callbacks.onDragCommit || null;
+    onCreateCommit = callbacks.onCreateCommit || null;
+    onDeleteRequest = callbacks.onDeleteRequest || null;
 
     playheadEl = document.createElement('div');
     playheadEl.id = 'playhead';
@@ -60,6 +69,25 @@ const Timeline = (() => {
     dragReadoutEl.hidden = true;
     trackEl.appendChild(dragReadoutEl);
 
+    createPreviewEl = document.createElement('div');
+    createPreviewEl.className = 'interval-create-preview';
+    createPreviewEl.hidden = true;
+    trackEl.appendChild(createPreviewEl);
+
+    contextMenuEl = document.createElement('div');
+    contextMenuEl.className = 'timeline-context-menu';
+    contextMenuEl.hidden = true;
+    const deleteItem = document.createElement('button');
+    deleteItem.type = 'button';
+    deleteItem.textContent = 'Delete Interval';
+    deleteItem.addEventListener('click', () => {
+      const index = Number(contextMenuEl.dataset.index);
+      hideContextMenu();
+      if (Number.isInteger(index) && onDeleteRequest) onDeleteRequest(index);
+    });
+    contextMenuEl.appendChild(deleteItem);
+    document.body.appendChild(contextMenuEl);
+
     videoEl.addEventListener('timeupdate', () => updatePlayhead());
     videoEl.addEventListener('seeked', () => updatePlayhead());
     videoEl.addEventListener('play', startPlayheadLoop);
@@ -67,6 +95,14 @@ const Timeline = (() => {
     videoEl.addEventListener('ended', stopPlayheadLoop);
 
     trackEl.addEventListener('pointerdown', onTrackPointerDown);
+    trackEl.addEventListener('contextmenu', onTrackContextMenu);
+    document.addEventListener('pointerdown', (event) => {
+      if (!contextMenuEl.contains(event.target)) hideContextMenu();
+    });
+    window.addEventListener('blur', hideContextMenu);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') hideContextMenu();
+    });
   }
 
   // --- Time mapping (fit-to-width) ---
@@ -145,7 +181,10 @@ const Timeline = (() => {
       const left = timeToX(a.start_s);
       const width = Math.max(timeToX(a.end_s) - left, 2);
       const lane = lanes[i];
-      const label = `Car ${a.car_number} · ${formatMMSS(a.start_s)}–${formatMMSS(a.end_s)} · ${Math.round(a.confidence * 100)}%`;
+      const confidenceLabel = a.confidence === null || a.confidence === undefined
+        ? 'Not scored'
+        : `${Math.round(a.confidence * 100)}%`;
+      const label = `Car ${a.car_number || 'Unassigned'} - ${formatMMSS(a.start_s)}-${formatMMSS(a.end_s)} - ${confidenceLabel}`;
 
       if (lane === -1) {
         // Overflow indicator: more intervals here than visible lanes.
@@ -203,6 +242,29 @@ const Timeline = (() => {
     trackEl.querySelectorAll('.interval').forEach((bar) => {
       bar.classList.toggle('selected', index !== null && bar.dataset.index === String(index));
     });
+  }
+
+  // --- Interval context menu ---
+
+  function hideContextMenu() {
+    if (contextMenuEl) contextMenuEl.hidden = true;
+  }
+
+  function onTrackContextMenu(event) {
+    const bar = event.target.closest('.interval');
+    if (!bar) return;
+
+    event.preventDefault();
+    const index = Number(bar.dataset.index);
+    if (!Number.isInteger(index)) return;
+    if (onIntervalClick) onIntervalClick(index);
+
+    contextMenuEl.dataset.index = String(index);
+    contextMenuEl.hidden = false;
+    const left = Math.min(event.clientX, window.innerWidth - contextMenuEl.offsetWidth - 4);
+    const top = Math.min(event.clientY, window.innerHeight - contextMenuEl.offsetHeight - 4);
+    contextMenuEl.style.left = `${Math.max(4, left)}px`;
+    contextMenuEl.style.top = `${Math.max(4, top)}px`;
   }
 
   // --- Interval dragging ---
@@ -342,13 +404,108 @@ const Timeline = (() => {
     updatePlayhead();
   }
 
-  // --- Seeking (click / click-drag on the track) ---
+  // --- Empty-track click and create-by-drag ---
 
   function seekToClientX(clientX) {
     const rect = trackEl.getBoundingClientRect();
     const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
     // Seek to the exact clicked time; only displayed values are rounded.
     videoEl.currentTime = xToTime(x);
+  }
+
+  function createBoundsForClientX(clientX) {
+    const maxTime = Math.floor(durationS);
+    const currentTime = pointerTime(clientX);
+    let start = Math.max(0, Math.min(maxTime, Math.round(Math.min(createState.startTime, currentTime))));
+    let end = Math.max(0, Math.min(maxTime, Math.round(Math.max(createState.startTime, currentTime))));
+
+    if (start === end) {
+      if (currentTime >= createState.startTime) {
+        start = Math.min(start, maxTime - 1);
+        end = start + 1;
+      } else {
+        end = Math.max(end, 1);
+        start = end - 1;
+      }
+    }
+
+    return { start_s: start, end_s: end };
+  }
+
+  function updateCreatePreview(clientX) {
+    if (!createState) return;
+    if (!createState.dragging
+        && Math.abs(clientX - createState.startClientX) < CREATE_DRAG_THRESHOLD_PX) {
+      return;
+    }
+
+    createState.dragging = true;
+    createState.bounds = createBoundsForClientX(clientX);
+    const left = timeToX(createState.bounds.start_s);
+    const right = timeToX(createState.bounds.end_s);
+    createPreviewEl.style.left = `${left}px`;
+    createPreviewEl.style.width = `${Math.max(2, right - left)}px`;
+    createPreviewEl.hidden = false;
+
+    const rect = trackEl.getBoundingClientRect();
+    dragReadoutEl.style.left = `${Math.min(Math.max(clientX - rect.left, 44), rect.width - 44)}px`;
+    dragReadoutEl.textContent = `${formatMMSS(createState.bounds.start_s)} - ${formatMMSS(createState.bounds.end_s)}`;
+    dragReadoutEl.hidden = false;
+  }
+
+  function cleanupCreate() {
+    window.removeEventListener('pointermove', onCreatePointerMove);
+    window.removeEventListener('pointerup', onCreatePointerUp);
+    window.removeEventListener('pointercancel', onCreatePointerCancel);
+    createPreviewEl.hidden = true;
+    dragReadoutEl.hidden = true;
+  }
+
+  function onCreatePointerMove(event) {
+    if (!createState || event.pointerId !== createState.pointerId) return;
+    updateCreatePreview(event.clientX);
+  }
+
+  function onCreatePointerUp(event) {
+    if (!createState || event.pointerId !== createState.pointerId) return;
+    updateCreatePreview(event.clientX);
+    const wasDragging = createState.dragging;
+    const bounds = createState.bounds;
+    cleanupCreate();
+    createState = null;
+
+    if (wasDragging && bounds) {
+      if (onCreateCommit) onCreateCommit(bounds);
+    } else {
+      seekToClientX(event.clientX);
+    }
+  }
+
+  function onCreatePointerCancel(event) {
+    if (!createState || event.pointerId !== createState.pointerId) return;
+    cleanupCreate();
+    createState = null;
+  }
+
+  function beginCreate(event) {
+    if (onEmptyTrackClick) onEmptyTrackClick();
+    event.preventDefault();
+    try {
+      trackEl.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events may not have an active pointer to capture.
+    }
+
+    createState = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startTime: pointerTime(event.clientX),
+      dragging: false,
+      bounds: null,
+    };
+    window.addEventListener('pointermove', onCreatePointerMove);
+    window.addEventListener('pointerup', onCreatePointerUp);
+    window.addEventListener('pointercancel', onCreatePointerCancel);
   }
 
   function onTrackPointerDown(e) {
@@ -361,24 +518,7 @@ const Timeline = (() => {
       beginIntervalDrag(e, bar, e.target.closest('.interval-edge'));
       return;
     }
-    if (onEmptyTrackClick) onEmptyTrackClick();
-
-    try {
-      trackEl.setPointerCapture(e.pointerId);
-    } catch {
-      // no active pointer (e.g. synthetic events) — drag still works within the track
-    }
-    seekToClientX(e.clientX);
-
-    const onMove = (ev) => seekToClientX(ev.clientX);
-    const onUp = () => {
-      trackEl.removeEventListener('pointermove', onMove);
-      trackEl.removeEventListener('pointerup', onUp);
-      trackEl.removeEventListener('pointercancel', onUp);
-    };
-    trackEl.addEventListener('pointermove', onMove);
-    trackEl.addEventListener('pointerup', onUp);
-    trackEl.addEventListener('pointercancel', onUp);
+    beginCreate(e);
   }
 
   // --- Public render entry points ---
@@ -400,7 +540,10 @@ const Timeline = (() => {
   function clear() {
     stopPlayheadLoop();
     if (dragState) cleanupDrag();
+    if (createState) cleanupCreate();
     dragState = null;
+    createState = null;
+    hideContextMenu();
     durationS = 0;
     pxPerSec = 0;
     appearances = [];
@@ -410,6 +553,7 @@ const Timeline = (() => {
     playheadEl.hidden = true;
     playheadEl.style.left = '0px';
     dragReadoutEl.hidden = true;
+    createPreviewEl.hidden = true;
   }
 
   return {

@@ -27,6 +27,7 @@ const Panel = (() => {
       const card = document.createElement('div');
       card.className = 'appearance-card';
       card.dataset.index = String(index);
+      card.tabIndex = -1;
 
       const header = document.createElement('div');
       header.className = 'card-header';
@@ -38,7 +39,9 @@ const Panel = (() => {
 
       const confidence = document.createElement('span');
       confidence.className = `card-confidence ${Timeline.bucketFor(a.confidence).cls}`;
-      confidence.textContent = `${Math.round(a.confidence * 100)}%`;
+      confidence.textContent = a.confidence === null || a.confidence === undefined
+        ? 'Not scored'
+        : `${Math.round(a.confidence * 100)}%`;
       header.appendChild(confidence);
 
       const times = document.createElement('div');
@@ -75,10 +78,17 @@ const Panel = (() => {
     });
   }
 
+  function focusFirstField(index) {
+    const card = listEl.querySelector(`.appearance-card[data-index="${index}"]`);
+    if (!card) return;
+    const field = card.querySelector('input, textarea, button, [contenteditable="true"]');
+    (field || card).focus({ preventScroll: true });
+  }
+
   function clear() {
     listEl.textContent = '';
     panelEl.hidden = true;
   }
 
-  return { init, render, setSelected, clear };
+  return { init, render, setSelected, focusFirstField, clear };
 })();

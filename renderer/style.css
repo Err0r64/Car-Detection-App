@@ -363,6 +363,126 @@ body {
   outline-color: var(--bucket-low);
 }
 
+.card-field-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.card-field-expand {
+  width: 28px;
+  height: 28px;
+  color: var(--text);
+  background: #181818;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.card-field-expand:hover,
+.card-field-expand:focus-visible {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent-hover);
+  outline: none;
+}
+
+.description-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-width: 560px;
+  margin: auto;
+  padding: 0;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid #555;
+  border-radius: 4px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.6);
+}
+
+.description-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.68);
+}
+
+.description-dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+}
+
+.description-dialog-content h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.description-dialog-textarea {
+  width: 100%;
+  min-height: 220px;
+  max-height: calc(100vh - 180px);
+  padding: 10px;
+  resize: vertical;
+  color: var(--text);
+  background: #181818;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.description-dialog-textarea:focus {
+  border-color: var(--accent-hover);
+  outline: 1px solid var(--accent-hover);
+}
+
+.description-dialog-error {
+  color: var(--bucket-low);
+  font-size: 12px;
+}
+
+.description-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-button {
+  min-width: 76px;
+  padding: 7px 14px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dialog-button-secondary {
+  background: transparent;
+}
+
+.dialog-button-secondary:hover,
+.dialog-button-secondary:focus-visible {
+  background: var(--border);
+  outline: none;
+}
+
+.dialog-button-primary {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.dialog-button-primary:hover,
+.dialog-button-primary:focus-visible {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  outline: none;
+}
+
 .card-subject-toggle {
   display: inline-flex;
   align-items: center;

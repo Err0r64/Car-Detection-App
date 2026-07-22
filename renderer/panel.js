@@ -7,13 +7,104 @@ const Panel = (() => {
   let listEl = null;
   let onSelect = null;
   let onEdit = null;
+  let descriptionDialog = null;
+  let descriptionTextarea = null;
+  let descriptionError = null;
+  let activeDescriptionIndex = null;
   const errorTimers = new WeakMap();
+
+  function ensureDescriptionDialog() {
+    if (descriptionDialog) return;
+
+    descriptionDialog = document.createElement('dialog');
+    descriptionDialog.className = 'description-dialog';
+    descriptionDialog.setAttribute('aria-labelledby', 'description-dialog-title');
+
+    const content = document.createElement('div');
+    content.className = 'description-dialog-content';
+    const title = document.createElement('h2');
+    title.id = 'description-dialog-title';
+    title.textContent = 'Vehicle Description';
+
+    descriptionTextarea = document.createElement('textarea');
+    descriptionTextarea.className = 'description-dialog-textarea';
+    descriptionTextarea.setAttribute('aria-label', 'Vehicle Description');
+    descriptionTextarea.spellcheck = true;
+
+    descriptionError = document.createElement('div');
+    descriptionError.className = 'description-dialog-error';
+    descriptionError.setAttribute('role', 'status');
+    descriptionError.hidden = true;
+
+    const actions = document.createElement('div');
+    actions.className = 'description-dialog-actions';
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'dialog-button dialog-button-secondary';
+    cancelButton.textContent = 'Cancel';
+    const applyButton = document.createElement('button');
+    applyButton.type = 'button';
+    applyButton.className = 'dialog-button dialog-button-primary';
+    applyButton.textContent = 'Apply';
+    actions.appendChild(cancelButton);
+    actions.appendChild(applyButton);
+
+    content.appendChild(title);
+    content.appendChild(descriptionTextarea);
+    content.appendChild(descriptionError);
+    content.appendChild(actions);
+    descriptionDialog.appendChild(content);
+    document.body.appendChild(descriptionDialog);
+
+    const applyDescription = () => {
+      if (activeDescriptionIndex === null) return;
+      const result = onEdit(activeDescriptionIndex, 'notes', descriptionTextarea.value);
+      if (!result.ok) {
+        descriptionError.textContent = result.error;
+        descriptionError.hidden = false;
+        return;
+      }
+      descriptionDialog.close();
+    };
+
+    cancelButton.addEventListener('click', () => descriptionDialog.close());
+    applyButton.addEventListener('click', applyDescription);
+    descriptionTextarea.addEventListener('keydown', (event) => {
+      if (event.ctrlKey && event.key === 'Enter') {
+        event.preventDefault();
+        applyDescription();
+      }
+    });
+    descriptionDialog.addEventListener('close', () => {
+      if (descriptionDialog.open) return;
+      activeDescriptionIndex = null;
+      descriptionTextarea.value = '';
+      descriptionError.textContent = '';
+      descriptionError.hidden = true;
+    });
+  }
+
+  function openDescriptionDialog(index, value) {
+    ensureDescriptionDialog();
+    activeDescriptionIndex = index;
+    descriptionTextarea.value = value;
+    descriptionError.textContent = '';
+    descriptionError.hidden = true;
+    onSelect(index);
+    descriptionDialog.showModal();
+    descriptionTextarea.focus();
+    descriptionTextarea.setSelectionRange(
+      descriptionTextarea.value.length,
+      descriptionTextarea.value.length
+    );
+  }
 
   function init(els, callbacks) {
     panelEl = els.panel;
     listEl = els.list;
     onSelect = callbacks.onSelect;
     onEdit = callbacks.onEdit;
+    ensureDescriptionDialog();
   }
 
   function parseMMSS(rawValue) {
@@ -109,7 +200,27 @@ const Panel = (() => {
     });
 
     wrapper.appendChild(label);
-    wrapper.appendChild(input);
+    if (options.expandable) {
+      const inputRow = document.createElement('div');
+      inputRow.className = 'card-field-input-row';
+      const expandButton = document.createElement('button');
+      expandButton.type = 'button';
+      expandButton.className = 'card-field-expand';
+      expandButton.textContent = '↗';
+      expandButton.title = 'Expand vehicle description';
+      expandButton.setAttribute('aria-label', 'Expand vehicle description');
+      expandButton.addEventListener('mousedown', (event) => event.preventDefault());
+      expandButton.addEventListener('click', () => {
+        const displayedOriginal = String(options.displayValue).replace(/[\r\n]/g, '');
+        const value = input.value === displayedOriginal ? options.displayValue : input.value;
+        openDescriptionDialog(index, value);
+      });
+      inputRow.appendChild(input);
+      inputRow.appendChild(expandButton);
+      wrapper.appendChild(inputRow);
+    } else {
+      wrapper.appendChild(input);
+    }
     return wrapper;
   }
 
@@ -167,6 +278,7 @@ const Panel = (() => {
         field: 'notes',
         displayValue: String(appearance.notes ?? ''),
         spellcheck: true,
+        expandable: true,
       });
 
       const subjectLabel = document.createElement('label');
@@ -224,6 +336,7 @@ const Panel = (() => {
   }
 
   function clear() {
+    if (descriptionDialog && descriptionDialog.open) descriptionDialog.close();
     listEl.textContent = '';
     panelEl.hidden = true;
   }

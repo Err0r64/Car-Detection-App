@@ -56,6 +56,15 @@ function deleteAppearance(index = selectedAppearance) {
   return true;
 }
 
+function restoreDeletedAppearance() {
+  const result = DetectionState.updateDetections({ type: 'restore' });
+  if (!result.ok) return false;
+
+  setSelection(result.restoredIndex);
+  Panel.focusFirstField(result.restoredIndex);
+  return true;
+}
+
 function createAppearance(bounds) {
   const result = DetectionState.updateDetections({
     type: 'create',
@@ -128,13 +137,18 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
+  if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'z' && !isTextEntry(e.target)) {
+    if (restoreDeletedAppearance()) e.preventDefault();
+    return;
+  }
+
   if (e.ctrlKey && e.key.toLowerCase() === 'x' && !isTextEntry(e.target)) {
     if (selectedAppearance !== null) {
       e.preventDefault();
       deleteAppearance();
     }
   }
-});
+}, true);
 
 // Active project { name, path } and video { path, name, url }, null until chosen.
 let currentProject = null;

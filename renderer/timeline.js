@@ -41,6 +41,7 @@ const Timeline = (() => {
   let selectedIndex = null;
   let dragState = null;
   let createState = null;
+  let playheadDragPointerId = null;
   let onIntervalClick = null;
   let onEmptyTrackClick = null;
   let onDragPreview = null;
@@ -413,6 +414,48 @@ const Timeline = (() => {
     videoEl.currentTime = xToTime(x);
   }
 
+  function cleanupPlayheadDrag() {
+    window.removeEventListener('pointermove', onPlayheadPointerMove);
+    window.removeEventListener('pointerup', onPlayheadPointerUp);
+    window.removeEventListener('pointercancel', onPlayheadPointerCancel);
+    document.body.classList.remove('playhead-dragging');
+  }
+
+  function onPlayheadPointerMove(event) {
+    if (event.pointerId !== playheadDragPointerId) return;
+    seekToClientX(event.clientX);
+  }
+
+  function onPlayheadPointerUp(event) {
+    if (event.pointerId !== playheadDragPointerId) return;
+    seekToClientX(event.clientX);
+    cleanupPlayheadDrag();
+    playheadDragPointerId = null;
+  }
+
+  function onPlayheadPointerCancel(event) {
+    if (event.pointerId !== playheadDragPointerId) return;
+    cleanupPlayheadDrag();
+    playheadDragPointerId = null;
+  }
+
+  function beginPlayheadDrag(event) {
+    if (onEmptyTrackClick) onEmptyTrackClick();
+    event.preventDefault();
+    try {
+      trackEl.setPointerCapture(event.pointerId);
+    } catch {
+      // Synthetic pointer events may not have an active pointer to capture.
+    }
+
+    playheadDragPointerId = event.pointerId;
+    document.body.classList.add('playhead-dragging');
+    seekToClientX(event.clientX);
+    window.addEventListener('pointermove', onPlayheadPointerMove);
+    window.addEventListener('pointerup', onPlayheadPointerUp);
+    window.addEventListener('pointercancel', onPlayheadPointerCancel);
+  }
+
   function createBoundsForClientX(clientX) {
     const maxTime = Math.floor(durationS);
     const currentTime = pointerTime(clientX);
@@ -511,8 +554,13 @@ const Timeline = (() => {
   function onTrackPointerDown(e) {
     if (durationS <= 0 || e.button !== 0) return;
 
-    // Clicks on an interval bar select it instead of seeking; clicks on the
-    // empty track seek and clear the selection.
+    // The playhead owns its drag gesture; interval bars edit detections, and
+    // genuinely empty track space creates a new interval.
+    if (e.target.closest('#playhead')) {
+      beginPlayheadDrag(e);
+      return;
+    }
+
     const bar = e.target.closest('.interval');
     if (bar) {
       beginIntervalDrag(e, bar, e.target.closest('.interval-edge'));
@@ -541,8 +589,10 @@ const Timeline = (() => {
     stopPlayheadLoop();
     if (dragState) cleanupDrag();
     if (createState) cleanupCreate();
+    if (playheadDragPointerId !== null) cleanupPlayheadDrag();
     dragState = null;
     createState = null;
+    playheadDragPointerId = null;
     hideContextMenu();
     durationS = 0;
     pxPerSec = 0;

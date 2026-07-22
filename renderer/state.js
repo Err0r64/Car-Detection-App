@@ -10,10 +10,12 @@ const DetectionState = (() => {
     'subject',
     'notes',
   ]);
+  const MAX_DELETION_HISTORY = 50;
 
   let detections = [];
   let durationS = 0;
   let dirty = false;
+  let deletedIntervals = [];
   const listeners = new Set();
 
   function cloneDetections(items = detections) {
@@ -40,6 +42,7 @@ const DetectionState = (() => {
       : 0;
     detections = cloneDetections(Array.isArray(items) ? items : []);
     dirty = options.dirty === true;
+    deletedIntervals = [];
     emit({ type: 'initialize' });
   }
 
@@ -101,11 +104,19 @@ const DetectionState = (() => {
 
     const next = cloneDetections();
     let changed = false;
+    let deletedEntry = null;
+    let restoredIndex = null;
 
     if (action.type === 'create') {
       const normalized = normalizeCreatedAppearance(action.appearance || action);
       if (normalized.error) return fail(normalized.error);
       next.push(normalized.value);
+      changed = true;
+    } else if (action.type === 'restore') {
+      if (deletedIntervals.length === 0) return fail('No deleted interval to restore.');
+      const entry = deletedIntervals[deletedIntervals.length - 1];
+      restoredIndex = Math.min(entry.index, next.length);
+      next.splice(restoredIndex, 0, { ...entry.appearance });
       changed = true;
     } else {
       if (!validIndex(action.index)) return fail('Appearance not found.');
@@ -134,6 +145,10 @@ const DetectionState = (() => {
         current.end_s += delta;
         changed = delta !== 0;
       } else if (action.type === 'delete') {
+        deletedEntry = {
+          appearance: { ...current },
+          index: action.index,
+        };
         next.splice(action.index, 1);
         changed = true;
       } else if (action.type === 'edit-field') {
@@ -158,7 +173,10 @@ const DetectionState = (() => {
       }
     }
 
-    const changedItem = action.type === 'delete' ? null : next[action.index];
+    let changedIndex = action.index;
+    if (action.type === 'create') changedIndex = next.length - 1;
+    if (action.type === 'restore') changedIndex = restoredIndex;
+    const changedItem = action.type === 'delete' ? null : next[changedIndex];
     if (changedItem) {
       const error = validateInterval(changedItem.start_s, changedItem.end_s);
       if (error) return fail(error);
@@ -168,8 +186,26 @@ const DetectionState = (() => {
 
     detections = next;
     dirty = true;
-    emit(action);
-    return { ok: true, changed: true, ...snapshot(action) };
+
+    if (action.type === 'delete') {
+      deletedIntervals.push(deletedEntry);
+      if (deletedIntervals.length > MAX_DELETION_HISTORY) deletedIntervals.shift();
+    } else if (action.type === 'restore') {
+      deletedIntervals.pop();
+    } else {
+      deletedIntervals = [];
+    }
+
+    const committedAction = action.type === 'restore'
+      ? { ...action, index: restoredIndex }
+      : action;
+    emit(committedAction);
+    return {
+      ok: true,
+      changed: true,
+      restoredIndex,
+      ...snapshot(committedAction),
+    };
   }
 
   function getDetections() {
@@ -178,6 +214,10 @@ const DetectionState = (() => {
 
   function isDirty() {
     return dirty;
+  }
+
+  function canUndoDelete() {
+    return deletedIntervals.length > 0;
   }
 
   function markClean() {
@@ -192,6 +232,7 @@ const DetectionState = (() => {
     updateDetections,
     getDetections,
     isDirty,
+    canUndoDelete,
     markClean,
   };
 })();

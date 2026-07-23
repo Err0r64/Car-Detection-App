@@ -26,6 +26,9 @@ const Timeline = (() => {
   const LANE_HEIGHT_PX = 19;
   const BAR_HEIGHT_PX = 17;
   const CREATE_DRAG_THRESHOLD_PX = 4;
+  const TIMESTAMP_SCALE = 1000;
+  const DRAG_STEP_S = 0.1;
+  const MIN_INTERVAL_S = 1 / TIMESTAMP_SCALE;
 
   let rulerEl = null;
   let trackEl = null;
@@ -121,9 +124,30 @@ const Timeline = (() => {
     return pxPerSec > 0 ? px / pxPerSec : 0;
   }
 
+  function roundTime(seconds) {
+    return Math.round(seconds * TIMESTAMP_SCALE) / TIMESTAMP_SCALE;
+  }
+
+  function snapTime(seconds) {
+    return roundTime(Math.round(seconds / DRAG_STEP_S) * DRAG_STEP_S);
+  }
+
+  function clampTime(seconds) {
+    return Math.max(0, Math.min(seconds, durationS));
+  }
+
   function formatMMSS(seconds) {
-    const s = Math.round(seconds);
-    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+    const total = Math.max(0, roundTime(Number(seconds) || 0));
+    const minutes = Math.floor(total / 60);
+    const secondsInMinute = roundTime(total - minutes * 60);
+    const [wholeSeconds, fractionalSeconds = ''] = secondsInMinute
+      .toFixed(3)
+      .replace(/\.0+$/, '')
+      .replace(/(\.\d*?)0+$/, '$1')
+      .split('.');
+    const secondsText = wholeSeconds.padStart(2, '0')
+      + (fractionalSeconds ? `.${fractionalSeconds}` : '');
+    return `${minutes}:${secondsText}`;
   }
 
   // --- Ruler ---
@@ -229,8 +253,8 @@ const Timeline = (() => {
     });
   }
 
-  // Sets the appearances rendered on the track (integer-second data straight
-  // from the fixture/pipeline; this module never mutates it).
+  // Sets the appearances rendered on the track. Timestamp precision is retained;
+  // this module only snaps values while the user is dragging.
   function setDetections(list) {
     appearances = Array.isArray(list) ? list.map((appearance) => ({ ...appearance })) : [];
     renderIntervals();
@@ -280,14 +304,15 @@ const Timeline = (() => {
     if (!dragState) return;
     const preview = appearances.map((appearance) => ({ ...appearance }));
     const item = preview[dragState.index];
-    const maxTime = Math.floor(durationS);
 
     if (dragState.kind === 'bound') {
-      const value = Math.round(pointerTime(clientX));
+      const value = snapTime(pointerTime(clientX));
       if (dragState.bound === 'start_s') {
-        item.start_s = Math.max(0, Math.min(value, item.end_s - 1));
+        const latestStart = roundTime(item.end_s - MIN_INTERVAL_S);
+        item.start_s = Math.max(0, Math.min(value, latestStart));
       } else {
-        item.end_s = Math.min(maxTime, Math.max(value, item.start_s + 1));
+        const earliestEnd = roundTime(item.start_s + MIN_INTERVAL_S);
+        item.end_s = Math.min(durationS, Math.max(value, earliestEnd));
       }
       dragState.action = {
         type: 'move-bound',
@@ -297,12 +322,12 @@ const Timeline = (() => {
       };
       dragReadoutEl.textContent = `${dragState.bound === 'start_s' ? 'Start' : 'End'} ${formatMMSS(item[dragState.bound])}`;
     } else {
-      const requestedDelta = Math.round(pointerTime(clientX) - dragState.anchorTime);
+      const requestedDelta = snapTime(pointerTime(clientX) - dragState.anchorTime);
       const minDelta = -dragState.original.start_s;
-      const maxDelta = maxTime - dragState.original.end_s;
+      const maxDelta = durationS - dragState.original.end_s;
       const delta = Math.max(minDelta, Math.min(requestedDelta, maxDelta));
-      item.start_s = dragState.original.start_s + delta;
-      item.end_s = dragState.original.end_s + delta;
+      item.start_s = roundTime(dragState.original.start_s + delta);
+      item.end_s = roundTime(dragState.original.end_s + delta);
       dragState.action = {
         type: 'move-interval',
         index: dragState.index,
@@ -457,22 +482,25 @@ const Timeline = (() => {
   }
 
   function createBoundsForClientX(clientX) {
-    const maxTime = Math.floor(durationS);
     const currentTime = pointerTime(clientX);
-    let start = Math.max(0, Math.min(maxTime, Math.round(Math.min(createState.startTime, currentTime))));
-    let end = Math.max(0, Math.min(maxTime, Math.round(Math.max(createState.startTime, currentTime))));
+    let start = clampTime(snapTime(Math.min(createState.startTime, currentTime)));
+    let end = clampTime(snapTime(Math.max(createState.startTime, currentTime)));
 
-    if (start === end) {
+    if (end - start < DRAG_STEP_S) {
       if (currentTime >= createState.startTime) {
-        start = Math.min(start, maxTime - 1);
-        end = start + 1;
+        end = Math.min(durationS, roundTime(start + DRAG_STEP_S));
+        if (end - start < MIN_INTERVAL_S) {
+          start = Math.max(0, roundTime(end - DRAG_STEP_S));
+        }
       } else {
-        end = Math.max(end, 1);
-        start = end - 1;
+        start = Math.max(0, roundTime(end - DRAG_STEP_S));
+        if (end - start < MIN_INTERVAL_S) {
+          end = Math.min(durationS, roundTime(start + DRAG_STEP_S));
+        }
       }
     }
 
-    return { start_s: start, end_s: end };
+    return { start_s: roundTime(start), end_s: roundTime(end) };
   }
 
   function updateCreatePreview(clientX) {

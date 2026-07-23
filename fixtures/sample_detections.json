@@ -6,16 +6,16 @@
   "appearances": [
     {
       "car_number": "27",
-      "start_s": 8,
-      "end_s": 22,
+      "start_s": 8.25,
+      "end_s": 22.75,
       "subject": true,
       "confidence": 0.93,
       "notes": "Red #27 GT3, clear broadside pass"
     },
     {
       "car_number": "14",
-      "start_s": 30,
-      "end_s": 45,
+      "start_s": 30.1,
+      "end_s": 45.6,
       "subject": true,
       "confidence": 0.72,
       "notes": "White #14 partially occluded by pit wall"

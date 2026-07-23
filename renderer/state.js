@@ -11,6 +11,8 @@ const DetectionState = (() => {
     'notes',
   ]);
   const MAX_DELETION_HISTORY = 50;
+  const TIMESTAMP_SCALE = 1000;
+  const MIN_INTERVAL_S = 1 / TIMESTAMP_SCALE;
 
   let detections = [];
   let durationS = 0;
@@ -37,10 +39,13 @@ const DetectionState = (() => {
   }
 
   function initialize(items, videoDurationS, options = {}) {
-    durationS = Number.isFinite(videoDurationS) && videoDurationS > 0
-      ? Math.floor(videoDurationS)
+    const normalizedDuration = toTimestamp(videoDurationS);
+    durationS = normalizedDuration !== null && normalizedDuration > 0
+      ? normalizedDuration
       : 0;
-    detections = cloneDetections(Array.isArray(items) ? items : []);
+    detections = (Array.isArray(items) ? items : [])
+      .map(normalizeIncomingAppearance)
+      .filter((item) => item !== null);
     dirty = options.dirty === true;
     deletedIntervals = [];
     emit({ type: 'initialize' });
@@ -59,30 +64,47 @@ const DetectionState = (() => {
     return Number.isInteger(index) && index >= 0 && index < detections.length;
   }
 
-  function toInteger(value) {
+  function toTimestamp(value) {
     const number = Number(value);
-    return Number.isFinite(number) ? Math.round(number) : null;
+    return Number.isFinite(number)
+      ? Math.round(number * TIMESTAMP_SCALE) / TIMESTAMP_SCALE
+      : null;
+  }
+
+  function clampTimestamp(value) {
+    return Math.max(0, Math.min(value, durationS));
+  }
+
+  function normalizeIncomingAppearance(appearance) {
+    const rawStart = toTimestamp(appearance?.start_s);
+    const rawEnd = toTimestamp(appearance?.end_s);
+    if (rawStart === null || rawEnd === null || rawStart >= rawEnd) return null;
+
+    const start = clampTimestamp(rawStart);
+    const end = clampTimestamp(rawEnd);
+    if (start >= end) return null;
+    return { ...appearance, start_s: start, end_s: end };
   }
 
   function validateInterval(start, end) {
-    if (!Number.isInteger(start) || !Number.isInteger(end)) {
-      return 'Times must be whole seconds.';
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return 'Times must be numeric.';
     }
     if (start < 0 || start > durationS || end < 0 || end > durationS) {
-      return `Times must be between 0:00 and ${Math.floor(durationS / 60)}:${String(durationS % 60).padStart(2, '0')}.`;
+      return `Times must be between 0 and ${durationS} seconds.`;
     }
-    if (start >= end) return 'Start must be at least one second before end.';
+    if (start >= end) return 'Start must be before end.';
     return null;
   }
 
   function normalizeCreatedAppearance(appearance) {
-    const rawStart = toInteger(appearance.start_s);
-    const rawEnd = toInteger(appearance.end_s);
+    const rawStart = toTimestamp(appearance.start_s);
+    const rawEnd = toTimestamp(appearance.end_s);
     if (rawStart === null || rawEnd === null) {
       return { error: 'Times must be numeric.' };
     }
-    const start = Math.max(0, Math.min(rawStart, Math.max(0, durationS - 1)));
-    const end = Math.max(start + 1, Math.min(rawEnd, durationS));
+    const start = clampTimestamp(rawStart);
+    const end = clampTimestamp(rawEnd);
     const error = validateInterval(start, end);
     if (error) return { error };
     return {
@@ -126,23 +148,25 @@ const DetectionState = (() => {
         if (action.bound !== 'start_s' && action.bound !== 'end_s') {
           return fail('Unknown interval bound.');
         }
-        const rounded = toInteger(action.value);
-        if (rounded === null) return fail('Time must be numeric.');
+        const value = toTimestamp(action.value);
+        if (value === null) return fail('Time must be numeric.');
 
         if (action.bound === 'start_s') {
-          current.start_s = Math.max(0, Math.min(rounded, current.end_s - 1));
+          const latestStart = toTimestamp(current.end_s - MIN_INTERVAL_S);
+          current.start_s = Math.max(0, Math.min(value, latestStart));
         } else {
-          current.end_s = Math.min(durationS, Math.max(rounded, current.start_s + 1));
+          const earliestEnd = toTimestamp(current.start_s + MIN_INTERVAL_S);
+          current.end_s = Math.min(durationS, Math.max(value, earliestEnd));
         }
         changed = current[action.bound] !== detections[action.index][action.bound];
       } else if (action.type === 'move-interval') {
-        const requestedDelta = toInteger(action.delta_s);
+        const requestedDelta = toTimestamp(action.delta_s);
         if (requestedDelta === null) return fail('Move amount must be numeric.');
         const minDelta = -current.start_s;
         const maxDelta = durationS - current.end_s;
         const delta = Math.max(minDelta, Math.min(requestedDelta, maxDelta));
-        current.start_s += delta;
-        current.end_s += delta;
+        current.start_s = toTimestamp(current.start_s + delta);
+        current.end_s = toTimestamp(current.end_s + delta);
         changed = delta !== 0;
       } else if (action.type === 'delete') {
         deletedEntry = {
@@ -154,8 +178,8 @@ const DetectionState = (() => {
       } else if (action.type === 'edit-field') {
         if (!EDITABLE_FIELDS.has(action.field)) return fail('Field is not editable.');
         if (action.field === 'start_s' || action.field === 'end_s') {
-          const value = Number(action.value);
-          if (!Number.isInteger(value)) return fail('Times must be whole seconds.');
+          const value = toTimestamp(action.value);
+          if (value === null) return fail('Times must be numeric.');
           const candidateStart = action.field === 'start_s' ? value : current.start_s;
           const candidateEnd = action.field === 'end_s' ? value : current.end_s;
           const error = validateInterval(candidateStart, candidateEnd);

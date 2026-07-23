@@ -1,0 +1,6 @@
+{
+  "pythonPath": "python",
+  "analyzeScript": "pipeline/analyze.py",
+  "ffmpegPath": "ffmpeg",
+  "useDevStub": false
+}

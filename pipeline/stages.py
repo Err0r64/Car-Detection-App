@@ -101,8 +101,51 @@ def _run_gemini(
         client.cleanup()
 
 
-def _round_seconds(value: float) -> int:
-    return math.floor(value + 0.5)
+def _decode_concatenated_mmss(value: float) -> float | None:
+    whole = int(value)
+    if value != whole or whole < 100:
+        return None
+    minutes, seconds = divmod(whole, 100)
+    if seconds >= 60:
+        return None
+    return float(minutes * 60 + seconds)
+
+
+def _recover_wire_bounds(
+    start_s: float,
+    end_s: float,
+    video_duration_s: float,
+) -> tuple[float, float]:
+    if start_s <= video_duration_s or end_s <= video_duration_s:
+        return start_s, end_s
+
+    decoded_start = _decode_concatenated_mmss(start_s)
+    decoded_end = _decode_concatenated_mmss(end_s)
+    if (
+        decoded_start is not None
+        and decoded_end is not None
+        and decoded_start < decoded_end <= video_duration_s
+    ):
+        return decoded_start, decoded_end
+    return start_s, end_s
+
+
+def _normalize_bounds(
+    start_s: float,
+    end_s: float,
+    video_duration_s: float,
+) -> tuple[float, float] | None:
+    if not math.isfinite(start_s) or not math.isfinite(end_s):
+        raise ValueError("has non-finite bounds")
+    if start_s >= end_s:
+        raise ValueError(f"has invalid bounds {start_s:g} to {end_s:g}")
+
+    normalized_start = min(video_duration_s, max(0.0, start_s))
+    normalized_end = min(video_duration_s, max(0.0, end_s))
+    if normalized_start >= normalized_end:
+        return None
+
+    return normalized_start, normalized_end
 
 
 def _normalize(raw_text: str, video_duration_s: float) -> dict[str, Any]:
@@ -110,24 +153,32 @@ def _normalize(raw_text: str, video_duration_s: float) -> dict[str, Any]:
     if not valid:
         raise AnalysisStageError("parsing", "Gemini returned an invalid appearance response")
 
-    duration_limit = math.floor(video_duration_s)
-    if duration_limit < 1 and appearances:
-        raise AnalysisStageError("parsing", "Video is too short for integer-second detections")
+    if not math.isfinite(video_duration_s) or video_duration_s <= 0:
+        raise AnalysisStageError("parsing", "Video duration must be a positive finite number")
 
     detections: list[dict[str, Any]] = []
     for index, appearance in enumerate(appearances, start=1):
-        start_s = min(duration_limit, max(0, _round_seconds(appearance.start_s)))
-        end_s = min(duration_limit, max(0, _round_seconds(appearance.end_s)))
+        wire_start, wire_end = _recover_wire_bounds(
+            appearance.start_s,
+            appearance.end_s,
+            video_duration_s,
+        )
+        try:
+            normalized_bounds = _normalize_bounds(
+                wire_start,
+                wire_end,
+                video_duration_s,
+            )
+        except ValueError as error:
+            raise AnalysisStageError("parsing", f"Appearance {index} {error}") from error
+        if normalized_bounds is None:
+            continue
+        start_s, end_s = normalized_bounds
         confidence = appearance.detection_confidence
-        if not 0 <= confidence <= 1:
+        if confidence is not None and not 0 <= confidence <= 1:
             raise AnalysisStageError(
                 "parsing",
                 f"Appearance {index} has confidence outside the 0 to 1 range",
-            )
-        if start_s >= end_s:
-            raise AnalysisStageError(
-                "parsing",
-                f"Appearance {index} has invalid normalized bounds {start_s} to {end_s}",
             )
         detections.append(
             {

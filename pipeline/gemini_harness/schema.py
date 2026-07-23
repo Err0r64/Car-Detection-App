@@ -25,8 +25,8 @@ class Appearance:
     car_number: str | None
     is_target_vehicle: bool
     vehicle_description: str
-    detection_confidence: float
-    subject_confidence: float
+    detection_confidence: float | None
+    subject_confidence: float | None
 
 
 @dataclass
@@ -37,23 +37,6 @@ class RunMeta:
     call_count: int = 0
     json_valid: bool = True
     raw_paths: list[str] = field(default_factory=list)
-
-
-DETECTOR_JSON_SCHEMA = {
-    "appearances": [
-        {
-            "appearance_id": "string",
-            "start_time_seconds": 0,
-            "end_time_seconds": 0,
-            "car_number": "string or null",
-            "is_target_vehicle": True,
-            "vehicle_description": "string",
-            "detection_confidence": 0.0,
-            "subject_confidence": 0.0,
-        }
-    ]
-}
-SCHEMA_PROMPT_BLOCK = json.dumps(DETECTOR_JSON_SCHEMA, indent=2)
 
 
 def _extract_json(text: str) -> Any:
@@ -99,6 +82,10 @@ def _number(value: Any, field_name: str) -> float:
     return result
 
 
+def _optional_number(value: Any, field_name: str) -> float | None:
+    return None if value is None else _number(value, field_name)
+
+
 def _optional_string(value: Any) -> str | None:
     if value is None:
         return None
@@ -107,6 +94,27 @@ def _optional_string(value: Any) -> str | None:
 
 
 def _coerce_appearance(item: dict[str, Any], index: int) -> Appearance:
+    validated_wire_format = any(
+        field in item for field in ("start_s", "end_s", "is_target", "color", "notes")
+    )
+    if validated_wire_format:
+        subject = item.get("is_target")
+        if not isinstance(subject, bool):
+            raise ValueError("is_target must be boolean")
+        color = _optional_string(item.get("color"))
+        notes = _optional_string(item.get("notes"))
+        description = " - ".join(part for part in (color, notes) if part)
+        return Appearance(
+            appearance_id=f"a{index}",
+            start_s=_seconds(item.get("start_s")),
+            end_s=_seconds(item.get("end_s")),
+            car_number=_optional_string(item.get("car_number")),
+            is_target_vehicle=subject,
+            vehicle_description=description,
+            detection_confidence=None,
+            subject_confidence=None,
+        )
+
     subject = item.get("is_target_vehicle")
     if not isinstance(subject, bool):
         raise ValueError("is_target_vehicle must be boolean")
@@ -117,8 +125,12 @@ def _coerce_appearance(item: dict[str, Any], index: int) -> Appearance:
         car_number=_optional_string(item.get("car_number")),
         is_target_vehicle=subject,
         vehicle_description=str(item.get("vehicle_description") or "").strip(),
-        detection_confidence=_number(item.get("detection_confidence"), "detection_confidence"),
-        subject_confidence=_number(item.get("subject_confidence"), "subject_confidence"),
+        detection_confidence=_optional_number(
+            item.get("detection_confidence"), "detection_confidence"
+        ),
+        subject_confidence=_optional_number(
+            item.get("subject_confidence"), "subject_confidence"
+        ),
     )
 
 

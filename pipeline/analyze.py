@@ -352,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         run_post_proxy(
             proxy_path,
             output_path,
-            proxy_result["proxyDurationS"],
+            proxy_result["sourceDurationS"],
             emit,
             dry_run=args.dry_run,
         )

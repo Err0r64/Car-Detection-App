@@ -21,8 +21,8 @@
         ],
         "properties": {
           "car_number": { "type": "string" },
-          "start_s": { "type": "integer", "minimum": 0 },
-          "end_s": { "type": "integer", "minimum": 1 },
+          "start_s": { "type": "number", "minimum": 0 },
+          "end_s": { "type": "number", "exclusiveMinimum": 0 },
           "subject": { "type": "boolean" },
           "confidence": {
             "anyOf": [

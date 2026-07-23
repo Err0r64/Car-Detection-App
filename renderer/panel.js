@@ -108,8 +108,8 @@ const Panel = (() => {
   }
 
   function parseMMSS(rawValue) {
-    const match = String(rawValue).trim().match(/^(\d+):([0-5]\d)$/);
-    if (!match) return { error: 'Use MM:SS with seconds from 00 to 59.' };
+    const match = String(rawValue).trim().match(/^(\d+):([0-5]\d(?:\.\d{1,3})?)$/);
+    if (!match) return { error: 'Use MM:SS or MM:SS.sss with seconds from 00 to 59.' };
     return { value: Number(match[1]) * 60 + Number(match[2]) };
   }
 

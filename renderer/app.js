@@ -169,9 +169,14 @@ let fixtureAppearances = null;
 let pendingProjectLoad = null;
 let saveInProgress = false;
 let navigationInProgress = false;
+let analysisNeedsSave = false;
+
+function hasUnsavedWork() {
+  return DetectionState.isDirty() || analysisNeedsSave;
+}
 
 function updateSaveButton(dirty = DetectionState.isDirty()) {
-  btnSaveChanges.disabled = saveInProgress || !currentVideo || !dirty;
+  btnSaveChanges.disabled = saveInProgress || !currentVideo || !(dirty || analysisNeedsSave);
 }
 
 function setNavigationInProgress(inProgress) {
@@ -182,7 +187,7 @@ function setNavigationInProgress(inProgress) {
 }
 
 async function resolveUnsavedChanges(destination) {
-  if (!DetectionState.isDirty()) return true;
+  if (!hasUnsavedWork()) return true;
 
   const action = await window.editorAPI.confirmUnsavedChanges(
     currentVideo?.name,
@@ -192,7 +197,7 @@ async function resolveUnsavedChanges(destination) {
   if (action !== 'save') return false;
 
   const saved = await saveCurrentProject();
-  return saved && !DetectionState.isDirty();
+  return saved && !hasUnsavedWork();
 }
 
 // Analysis run state
@@ -253,6 +258,7 @@ function exitToLanding() {
   currentVideo = null;
   pendingProjectLoad = null;
   saveInProgress = false;
+  analysisNeedsSave = false;
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
@@ -330,6 +336,7 @@ async function loadFixtureDetections() {
 function showVideo(video, options = {}) {
   currentVideo = video;
   currentProjectFilePath = options.projectFilePath || null;
+  analysisNeedsSave = false;
   fixtureAppearances = null;
   pendingProjectLoad = Array.isArray(options.detections)
     ? { detections: options.detections }
@@ -369,12 +376,12 @@ btnOpenVideo.addEventListener('click', async () => {
 // --- Project save/load (.vproj.json) ---
 
 async function saveCurrentProject() {
-  if (!currentVideo || !DetectionState.isDirty() || saveInProgress) return false;
+  if (!currentVideo || !hasUnsavedWork() || saveInProgress) return false;
 
   const project = {
     version: 1,
     videoPath: currentVideo.path,
-    videoDurationS: Math.floor(videoPlayer.duration),
+    videoDurationS: Number(videoPlayer.duration.toFixed(3)),
     detections: DetectionState.getDetections(),
     savedAt: new Date().toISOString(),
   };
@@ -395,12 +402,16 @@ async function saveCurrentProject() {
     const stateUnchanged = currentVideo
       && currentVideo.path === savedVideoPath
       && JSON.stringify(DetectionState.getDetections()) === savedState;
-    if (stateUnchanged) DetectionState.markClean();
+    if (stateUnchanged) {
+      analysisNeedsSave = false;
+      DetectionState.markClean();
+      updateSaveButton();
+    }
     statusStage.textContent = `Saved ${savedPath}`;
     statusElapsed.textContent = '';
     statusTokens.textContent = '';
     statusLine.hidden = false;
-    return !DetectionState.isDirty();
+    return !hasUnsavedWork();
   } finally {
     saveInProgress = false;
     updateSaveButton();
@@ -437,7 +448,7 @@ videoPlayer.addEventListener('error', () => {
   videoPlaceholder.textContent = `Could not play ${currentVideo.name}`;
 });
 
-// --- Stubbed analysis run ---
+// --- Analysis run ---
 
 // Stops the timer and restores idle button states; leaves the status line
 // alone so callers decide what it shows afterwards.
@@ -475,16 +486,42 @@ btnCancel.addEventListener('click', () => {
   window.editorAPI.cancelAnalysis();
 });
 
+async function completeAnalysis(evt) {
+  endAnalysisRun();
+
+  if (!evt.resultsPath) {
+    statusStage.textContent = 'Analysis complete';
+    return;
+  }
+
+  if (!await resolveUnsavedChanges('analysis')) {
+    statusStage.textContent = 'Analysis complete; existing detections kept';
+    return;
+  }
+
+  const results = await window.editorAPI.loadAnalysisResults();
+  if (!results || !Array.isArray(results.detections)) {
+    statusStage.textContent = 'Analysis results unavailable';
+    return;
+  }
+
+  DetectionState.initialize(results.detections, videoPlayer.duration, { dirty: false });
+  analysisNeedsSave = true;
+  setSelection(null);
+  updateSaveButton();
+  statusStage.textContent = `Analysis complete (${results.detections.length} detections)`;
+}
+
 window.editorAPI.onAnalysisEvent((evt) => {
   if (!analysisRunning) return;
 
   if (evt.event === 'start' && evt.stage) {
     statusStage.textContent = STAGE_LABELS[evt.stage] || evt.stage;
   } else if (evt.event === 'token') {
-    statusTokens.textContent = `${evt.count} tokens`;
+    const tokenCount = Number.isFinite(evt.outputTokens) ? evt.outputTokens : evt.count;
+    if (Number.isFinite(tokenCount)) statusTokens.textContent = `${tokenCount} tokens`;
   } else if (evt.event === 'done') {
-    endAnalysisRun();
-    statusStage.textContent = 'Analysis complete';
+    void completeAnalysis(evt);
   } else if (evt.event === 'canceled') {
     endAnalysisRun();
     statusLine.hidden = true;

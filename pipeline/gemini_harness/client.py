@@ -238,20 +238,16 @@ class GeminiClient:
     @staticmethod
     def _dry_response() -> str:
         return json.dumps(
-            {
-                "appearances": [
-                    {
-                        "appearance_id": "dry1",
-                        "start_time_seconds": "0:01",
-                        "end_time_seconds": 5.4,
-                        "car_number": "0",
-                        "is_target_vehicle": True,
-                        "vehicle_description": "dry-run stub vehicle",
-                        "detection_confidence": 0.9,
-                        "subject_confidence": 0.9,
-                    }
-                ]
-            }
+            [
+                {
+                    "start_s": "0:01",
+                    "end_s": 5.4,
+                    "is_target": True,
+                    "car_number": "0",
+                    "color": "Blue",
+                    "notes": "dry-run stub vehicle",
+                }
+            ]
         )
 
     def cleanup(self) -> None:

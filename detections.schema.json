@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apexiel.local/schemas/detections.schema.json",
+  "title": "Vehicle detection results",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["detections"],
+  "properties": {
+    "detections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "car_number",
+          "start_s",
+          "end_s",
+          "subject",
+          "confidence",
+          "notes"
+        ],
+        "properties": {
+          "car_number": { "type": "string" },
+          "start_s": { "type": "integer", "minimum": 0 },
+          "end_s": { "type": "integer", "minimum": 1 },
+          "subject": { "type": "boolean" },
+          "confidence": {
+            "anyOf": [
+              { "type": "number", "minimum": 0, "maximum": 1 },
+              { "type": "null" }
+            ]
+          },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}

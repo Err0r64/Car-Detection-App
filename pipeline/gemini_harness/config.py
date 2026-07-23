@@ -5,8 +5,9 @@ from __future__ import annotations
 import os
 
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 TEMPERATURE = 0.0
+SEED = 0
 DEFAULT_FPS = 1.0
 DEFAULT_MEDIA_RESOLUTION = "MEDIA_RESOLUTION_MEDIUM"
 

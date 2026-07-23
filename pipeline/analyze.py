@@ -21,7 +21,7 @@ from typing import Any
 from stages import AnalysisStageError, run_post_proxy
 
 
-PROXY_FPS = 30
+PROXY_CRF = 23
 MAX_PROXY_HEIGHT = 720
 MAX_DURATION_DELTA_S = 0.5
 CADENCE_RELATIVE_TOLERANCE = 0.02
@@ -189,6 +189,7 @@ def create_proxy(
     source_path: Path,
     proxy_path: Path,
     source_duration_s: float,
+    source_fps: float,
 ) -> None:
     global _active_process
 
@@ -214,11 +215,11 @@ def create_proxy(
         "-preset",
         "veryfast",
         "-crf",
-        "28",
+        str(PROXY_CRF),
         "-pix_fmt",
         "yuv420p",
         "-r",
-        str(PROXY_FPS),
+        f"{source_fps:.6f}",
         "-fps_mode",
         "cfr",
         "-movflags",
@@ -283,10 +284,16 @@ def proxy_stage(
     emit("proxy", "start")
     source_duration_s = probe_duration(ffprobe_path, source_path)
     source_fps = verify_constant_frame_rate(ffprobe_path, source_path)
-    create_proxy(ffmpeg_path, source_path, proxy_path, source_duration_s)
+    create_proxy(
+        ffmpeg_path,
+        source_path,
+        proxy_path,
+        source_duration_s,
+        source_fps,
+    )
 
     proxy_duration_s = probe_duration(ffprobe_path, proxy_path)
-    proxy_fps = verify_constant_frame_rate(ffprobe_path, proxy_path, PROXY_FPS)
+    proxy_fps = verify_constant_frame_rate(ffprobe_path, proxy_path, source_fps)
     duration_delta_s = abs(proxy_duration_s - source_duration_s)
     if duration_delta_s > MAX_DURATION_DELTA_S:
         raise PipelineError(

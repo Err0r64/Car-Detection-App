@@ -16,6 +16,41 @@ from .schema import RunConfig, RunMeta
 
 Observer = Callable[[str, dict[str, Any]], None]
 
+RESPONSE_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "appearances": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "appearance_id": {"type": "string"},
+                    "start_time_seconds": {"type": "number"},
+                    "end_time_seconds": {"type": "number"},
+                    "car_number": {"type": ["string", "null"]},
+                    "is_target_vehicle": {"type": "boolean"},
+                    "vehicle_description": {"type": "string"},
+                    "detection_confidence": {"type": "number"},
+                    "subject_confidence": {"type": "number"},
+                },
+                "required": [
+                    "appearance_id",
+                    "start_time_seconds",
+                    "end_time_seconds",
+                    "car_number",
+                    "is_target_vehicle",
+                    "vehicle_description",
+                    "detection_confidence",
+                    "subject_confidence",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["appearances"],
+    "additionalProperties": False,
+}
+
 
 class _ProgressReader(io.BufferedReader):
     def __init__(self, path: Path, observer: Observer) -> None:
@@ -138,7 +173,10 @@ class GeminiClient:
 
         generation_config = types.GenerateContentConfig(
             temperature=run_config.temperature,
+            seed=config.SEED,
             media_resolution=getattr(types.MediaResolution, run_config.media_resolution),
+            response_mime_type="application/json",
+            response_json_schema=RESPONSE_JSON_SCHEMA,
         )
         video_part = types.Part(
             file_data=types.FileData(
@@ -147,7 +185,7 @@ class GeminiClient:
             ),
             video_metadata=types.VideoMetadata(fps=run_config.fps),
         )
-        text, input_tokens, output_tokens = self._stream_with_retry(
+        text, input_tokens, output_tokens = self._generate_with_retry(
             [video_part, prompt], generation_config
         )
         self._write_raw(raw_path, text)
@@ -159,40 +197,32 @@ class GeminiClient:
             raw_paths=[os.fspath(raw_path.resolve())],
         )
 
-    def _stream_with_retry(self, contents: list[Any], generation_config: Any) -> tuple[str, int, int]:
+    def _generate_with_retry(
+        self,
+        contents: list[Any],
+        generation_config: Any,
+    ) -> tuple[str, int, int]:
         from google.genai import errors
 
         last_error: Exception | None = None
         for attempt in range(config.MAX_RETRIES_429 + 1):
             self._throttle()
-            chunks: list[str] = []
-            input_tokens = 0
-            output_tokens = 0
             try:
-                response = self._client.models.generate_content_stream(
+                response = self._client.models.generate_content(
                     model=self.model,
                     contents=contents,
                     config=generation_config,
                 )
-                for chunk in response:
-                    chunk_text = getattr(chunk, "text", None)
-                    if chunk_text:
-                        chunks.append(chunk_text)
-                    usage = getattr(chunk, "usage_metadata", None)
-                    next_input = getattr(usage, "prompt_token_count", 0) or input_tokens
-                    next_output = getattr(usage, "candidates_token_count", 0) or output_tokens
-                    if next_input != input_tokens or next_output != output_tokens:
-                        input_tokens = next_input
-                        output_tokens = next_output
-                        self.observer(
-                            "tokens",
-                            {"inputTokens": input_tokens, "outputTokens": output_tokens},
-                        )
-                if input_tokens == 0 and output_tokens == 0:
-                    self.observer("tokens", {"inputTokens": 0, "outputTokens": 0})
-                return "".join(chunks), input_tokens, output_tokens
+                usage = getattr(response, "usage_metadata", None)
+                input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                self.observer(
+                    "tokens",
+                    {"inputTokens": input_tokens, "outputTokens": output_tokens},
+                )
+                return getattr(response, "text", "") or "", input_tokens, output_tokens
             except errors.ClientError as error:
-                if getattr(error, "code", None) != 429 or chunks:
+                if getattr(error, "code", None) != 429:
                     raise
                 last_error = error
                 if attempt >= config.MAX_RETRIES_429:
@@ -238,16 +268,20 @@ class GeminiClient:
     @staticmethod
     def _dry_response() -> str:
         return json.dumps(
-            [
-                {
-                    "start_s": "0:01",
-                    "end_s": 5.4,
-                    "is_target": True,
-                    "car_number": "0",
-                    "color": "Blue",
-                    "notes": "dry-run stub vehicle",
-                }
-            ]
+            {
+                "appearances": [
+                    {
+                        "appearance_id": "dry-run-1",
+                        "start_time_seconds": 1.25,
+                        "end_time_seconds": 5.4,
+                        "car_number": "0",
+                        "is_target_vehicle": True,
+                        "vehicle_description": "Blue dry-run stub vehicle",
+                        "detection_confidence": 0.9,
+                        "subject_confidence": 0.9,
+                    }
+                ]
+            }
         )
 
     def cleanup(self) -> None:

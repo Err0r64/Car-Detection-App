@@ -36,6 +36,12 @@ def _observer(emit: Emit) -> Callable[[str, dict[str, Any]], None]:
             emit("processing", "progress", **payload)
         elif event == "tokens":
             emit("analyzing", "token", **payload)
+        elif event == "retry_wait":
+            emit("analyzing", "retry", **payload)
+        elif event == "retry_start":
+            emit("analyzing", "retry_start", **payload)
+        elif event == "rate_limit_wait":
+            emit("analyzing", "rate_limit", **payload)
 
     return observe
 

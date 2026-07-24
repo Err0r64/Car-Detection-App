@@ -89,12 +89,14 @@ class Cp2ParsingTests(unittest.TestCase):
         events: list[tuple[str, dict[str, object]]] = []
         directory = Path(__file__).with_name(".cp2-client-raw")
         raw_path = directory / "seeded-request.txt"
+        rate_limit_path = directory / "rate-limit.json"
 
         try:
             client = GeminiClient(
                 directory,
                 dry_run=True,
                 observer=lambda event, payload: events.append((event, payload)),
+                rate_limit_path=rate_limit_path,
             )
             client.dry_run = False
             client._client = fake_api
@@ -117,15 +119,127 @@ class Cp2ParsingTests(unittest.TestCase):
             self.assertEqual(raw_path.read_text(encoding="utf-8"), raw_response)
         finally:
             raw_path.unlink(missing_ok=True)
+            rate_limit_path.unlink(missing_ok=True)
+            rate_limit_path.with_name(f"{rate_limit_path.name}.lock").unlink(missing_ok=True)
             if directory.exists():
                 directory.rmdir()
 
         self.assertIsNotNone(fake_models.call)
         request_config = fake_models.call["config"]
         self.assertEqual(request_config.seed, gemini_config.SEED)
+        self.assertIsNone(request_config.temperature)
+        self.assertEqual(request_config.http_options.retry_options.attempts, 1)
         self.assertEqual(request_config.response_mime_type, "application/json")
         self.assertEqual(request_config.response_json_schema["required"], ["appearances"])
         self.assertEqual(events[-1], ("tokens", {"inputTokens": 120, "outputTokens": 45}))
+
+    def test_transient_503_retries_and_reports_wait(self) -> None:
+        from google.genai import errors
+
+        raw_response = response(start_time_seconds=12.5, end_time_seconds=70.5)
+
+        class FakeModels:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def generate_content(self, **_kwargs: object) -> object:
+                self.calls += 1
+                if self.calls == 1:
+                    raise errors.ServerError(
+                        503,
+                        {
+                            "error": {
+                                "code": 503,
+                                "message": "The model is overloaded.",
+                                "details": [
+                                    {
+                                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                        "retryDelay": "0s",
+                                    }
+                                ],
+                            }
+                        },
+                    )
+                usage = type(
+                    "Usage",
+                    (),
+                    {"prompt_token_count": 120, "candidates_token_count": 45},
+                )()
+                return type("Response", (), {"text": raw_response, "usage_metadata": usage})()
+
+        rate_limit_path = Path(__file__).with_name(".cp2-retry-limit.json")
+        events: list[tuple[str, dict[str, object]]] = []
+        client = GeminiClient(
+            Path(__file__).parent,
+            dry_run=True,
+            observer=lambda event, payload: events.append((event, payload)),
+            rate_limit_path=rate_limit_path,
+        )
+        client.dry_run = False
+        fake_models = FakeModels()
+        client._client = type("FakeApi", (), {"models": fake_models})()
+
+        try:
+            with (
+                patch.object(gemini_config, "MIN_REQUEST_INTERVAL_S", 0.0),
+                patch("gemini_harness.client.time.sleep") as sleep,
+            ):
+                text, input_tokens, output_tokens, call_count = client._generate_with_retry(
+                    [], object()
+                )
+        finally:
+            rate_limit_path.unlink(missing_ok=True)
+            rate_limit_path.with_name(f"{rate_limit_path.name}.lock").unlink(missing_ok=True)
+
+        self.assertEqual(text, raw_response)
+        self.assertEqual((input_tokens, output_tokens, call_count), (120, 45, 2))
+        self.assertEqual(fake_models.calls, 2)
+        sleep.assert_called_once_with(1.0)
+        self.assertEqual(events[0][0], "retry_wait")
+        self.assertEqual(events[0][1]["statusCode"], 503)
+        self.assertEqual(events[0][1]["attempt"], 2)
+        self.assertIn("retry_start", [event for event, _payload in events])
+        self.assertEqual(events[-1][0], "tokens")
+
+    def test_rate_limit_history_is_shared_across_clients(self) -> None:
+        rate_limit_path = Path(__file__).with_name(".cp2-shared-limit.json")
+        events: list[tuple[str, dict[str, object]]] = []
+        first = GeminiClient(
+            Path(__file__).parent,
+            dry_run=True,
+            rate_limit_path=rate_limit_path,
+        )
+        second = GeminiClient(
+            Path(__file__).parent,
+            dry_run=True,
+            observer=lambda event, payload: events.append((event, payload)),
+            rate_limit_path=rate_limit_path,
+        )
+        clock = [100.0]
+        sleeps: list[float] = []
+
+        def advance_clock(delay: float) -> None:
+            sleeps.append(delay)
+            clock[0] += delay
+
+        try:
+            with (
+                patch.object(gemini_config, "REQUESTS_PER_MINUTE", 1),
+                patch.object(gemini_config, "MIN_REQUEST_INTERVAL_S", 0.0),
+                patch.object(gemini_config, "RATE_WINDOW_S", 60.0),
+                patch.object(gemini_config, "RATE_MARGIN_S", 1.0),
+                patch("gemini_harness.client.time.time", side_effect=lambda: clock[0]),
+                patch("gemini_harness.client.time.sleep", side_effect=advance_clock),
+            ):
+                first._throttle()
+                second._throttle()
+        finally:
+            rate_limit_path.unlink(missing_ok=True)
+            rate_limit_path.with_name(f"{rate_limit_path.name}.lock").unlink(missing_ok=True)
+
+        self.assertEqual(sleeps, [61.0])
+        self.assertEqual(events[0][0], "rate_limit_wait")
+        self.assertEqual(events[0][1]["requestsPerMinute"], 1)
 
     def test_proxy_preserves_source_cadence_at_research_quality(self) -> None:
         process = type(

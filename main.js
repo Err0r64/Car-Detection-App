@@ -403,6 +403,10 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
   const childEnvironment = { ...process.env };
   if (!config.useDevStub) {
     childEnvironment.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+    childEnvironment.CAPSTONE_GEMINI_RATE_STATE = path.join(
+      app.getPath('userData'),
+      'gemini-rate-limit.json'
+    );
   }
   const child = spawn(config.pythonPath, args, {
     cwd: __dirname,

@@ -520,6 +520,21 @@ window.editorAPI.onAnalysisEvent((evt) => {
   } else if (evt.event === 'token') {
     const tokenCount = Number.isFinite(evt.outputTokens) ? evt.outputTokens : evt.count;
     if (Number.isFinite(tokenCount)) statusTokens.textContent = `${tokenCount} tokens`;
+  } else if (evt.event === 'retry') {
+    const delay = Number.isFinite(evt.delayS) ? Math.ceil(evt.delayS) : null;
+    statusStage.textContent = evt.statusCode === 429
+      ? 'Gemini rate limited; waiting to retry'
+      : 'Gemini temporarily unavailable; waiting to retry';
+    statusTokens.textContent = delay === null
+      ? `Attempt ${evt.attempt}/${evt.maxAttempts}`
+      : `Retry in ${delay}s - attempt ${evt.attempt}/${evt.maxAttempts}`;
+  } else if (evt.event === 'retry_start') {
+    statusStage.textContent = `Analyzing - attempt ${evt.attempt}/${evt.maxAttempts}`;
+    statusTokens.textContent = '';
+  } else if (evt.event === 'rate_limit') {
+    const delay = Number.isFinite(evt.delayS) ? Math.ceil(evt.delayS) : null;
+    statusStage.textContent = 'Waiting for Gemini request limit';
+    statusTokens.textContent = delay === null ? '' : `Continuing in ${delay}s`;
   } else if (evt.event === 'done') {
     void completeAnalysis(evt);
   } else if (evt.event === 'canceled') {

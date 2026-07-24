@@ -2,7 +2,7 @@
 
 Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
 
-Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Phase 5 CP1-CP2 adds the standalone CFR proxy and Gemini analysis pipeline. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
+Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Phase 5 CP1-CP3 adds the standalone CFR proxy and Gemini pipeline plus real Electron integration. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ Phase 2 established the secure Electron shell, project picker, local video playb
 - `GEMINI_API_KEY` in the environment for real analysis
 - Pipeline packages installed with `python -m pip install -r pipeline\requirements.txt`
 
-Electron continues to use the stubbed analysis pipeline until Phase 5 CP3. The real pipeline is currently testable from the terminal.
+Detect Vehicles uses the real pipeline by default. Start Electron from the same shell that contains `GEMINI_API_KEY` so the child process inherits it.
 
 ## Run
 
@@ -32,7 +32,7 @@ The project registry is stored as `projects.json` in Electron's user data direct
 
 ## Stubbed (Mock) Analysis
 
-Select **Detect Vehicles** to start `stub/fake_analysis.py`. The process emits JSON Lines events for five simulated stages:
+Set `useDevStub` to `true` in `config.json`, then select **Detect Vehicles** to run `stub/fake_analysis.py` without an API key or network access. The process emits JSON Lines events for five simulated stages:
 
 1. `proxy`
 2. `upload`
@@ -40,15 +40,16 @@ Select **Detect Vehicles** to start `stub/fake_analysis.py`. The process emits J
 4. `analyzing`
 5. `parsing`
 
-The editor displays the current stage, elapsed time, live token count during analysis, and a **Cancel** control. Canceling terminates the Python child process.
+The editor displays the current stage, elapsed time, live token count during analysis, and a **Cancel** control. Canceling terminates the Python child process. On success, the stub writes one schema-valid canned detection and exercises the same result-loading path as real analysis.
 
-To test the visible failure path in PowerShell:
+To test the simulated failure path, keep `useDevStub` set to `true` and run:
 
 ```powershell
 $env:FAKE_ANALYSIS_FAIL = '1'
 npm start
 Remove-Item Env:FAKE_ANALYSIS_FAIL
 ```
+Restore `useDevStub` to `false` before testing or using real analysis.
 
 ## Real Analysis Pipeline
 
@@ -61,7 +62,13 @@ python pipeline/analyze.py `
   --out "C:\path\to\results.json"
 ```
 
-The command writes `results.proxy.mp4`, uploads it through the Gemini Files API, waits for processing, streams a Gemini 2.5 Flash response, stores the raw response under a sibling `raw` directory, normalizes timestamps to integer seconds, validates the final data against `detections.schema.json`, and atomically writes `results.json`. It rejects variable-frame-rate sources and source/proxy duration differences greater than 0.5 seconds.
+The command writes `results.proxy.mp4`, uploads it through the Gemini Files API, waits for processing, submits one blocking Gemini 3.6 Flash request, stores the raw response under a sibling `raw` directory, preserves timestamps as fractional seconds, validates the final data against `detections.schema.json`, and atomically writes `results.json`. The proxy uses CRF 23, a maximum height of 720 pixels, and the source frame cadence. The pipeline rejects variable-frame-rate sources and source/proxy duration differences greater than 0.5 seconds.
+
+The request uses seed 0, 1 FPS Gemini sampling, medium media resolution, and an explicit JSON response schema. Sampling parameters such as temperature are omitted for Gemini 3.6 Flash. The duration-aware prompt in `pipeline/gemini_harness/prompts.py` uses the validated research response contract and tells the model not to extend appearances through absent footage, carry identities into later intervals, or create duplicate entries for one visible car. A fixed seed is best-effort reproducibility; Gemini can still interpret the same video differently across separate API calls.
+
+Bounds are clamped to the source duration. Intervals that collapse to zero length only because they lie outside the source are omitted, while model-provided zero-length or reversed intervals remain parsing errors. MM:SS strings are accepted at the model boundary; when both bounds exceed the clip duration, a valid concatenated MMSS pair such as `115-137` is narrowly recovered as `75-97` before validation. Rich response fields map directly to the application: `is_target_vehicle` becomes `subject`, `vehicle_description` becomes `notes`, and `detection_confidence` is retained.
+
+Gemini calls are limited to five requests per rolling minute by default and are spaced at least 12 seconds apart. Request history is shared across Electron analysis subprocesses through `gemini-rate-limit.json` in the application user-data directory. Transient `429`, `500`, `502`, `503`, and `504` responses are retried up to five total attempts using server-provided delays or exponential backoff with jitter. The analyzing status reports rate-limit and retry waits. Set `HARNESS_RPM`, `GEMINI_MIN_REQUEST_INTERVAL_S`, or `GEMINI_MAX_ATTEMPTS` before starting Electron to tune these safeguards.
 
 Stdout is reserved for flushed JSONL protocol events across `proxy`, `upload`, `processing`, `analyzing`, and `parsing`; diagnostics are written only to stderr. `GEMINI_API_KEY` is read only from the environment. Use `--dry-run` to exercise every stage with a canned model response and no key, network request, or API cost.
 
@@ -74,7 +81,7 @@ New-Item -ItemType Directory -Force -Path .\cp2-manual | Out-Null
 $source = 'C:\Users\epics.BLIPBWEEPBWOOP\Downloads\GX010094_stabilized_resized.mov'
 ffmpeg -hide_banner -loglevel error -y `
   -i $source -t 15 -map 0:v:0 -an `
-  -c:v libx264 -preset veryfast -crf 28 -r 30 -fps_mode cfr `
+  -c:v libx264 -preset veryfast -crf 23 -fps_mode cfr `
   ".\cp2-manual\short-cfr-video.mp4"
 
 python pipeline/analyze.py `
@@ -111,9 +118,7 @@ $events[-1]
 $result = Get-Content ".\cp2-manual\results.json" -Raw | ConvertFrom-Json
 $result.detections | Format-Table car_number,start_s,end_s,subject,confidence,notes
 $result.detections | Where-Object {
-  [double]$_.start_s -ne [math]::Truncate([double]$_.start_s) -or
-  [double]$_.end_s -ne [math]::Truncate([double]$_.end_s) -or
-  $_.start_s -ge $_.end_s
+  $_.start_s -lt 0 -or $_.start_s -ge $_.end_s
 }
 
 python -c "import json; from pathlib import Path; from jsonschema import Draft202012Validator; schema=json.loads(Path('detections.schema.json').read_text()); data=json.loads(Path('cp2-manual/results.json').read_text()); Draft202012Validator(schema).validate(data); print('schema valid')"
@@ -121,6 +126,36 @@ Get-ChildItem ".\cp2-manual\raw" -Filter '*.txt'
 ```
 
 The unique stages should be `analyzing`, `parsing`, `processing`, `proxy`, and `upload`; at least one token event should print; the final event should be `parsing/done` with the absolute results path. The invalid-bounds command should print no rows, schema validation should print `schema valid`, and the raw directory should contain the saved model response. Because only stdout is piped to `Tee-Object`, diagnostics remain on stderr and cannot contaminate the captured JSONL file.
+
+## Application Analysis Configuration
+
+`config.json` controls the main-process child command:
+
+```json
+{
+  "pythonPath": "python",
+  "analyzeScript": "pipeline/analyze.py",
+  "ffmpegPath": "ffmpeg",
+  "useDevStub": false
+}
+```
+
+Relative `analyzeScript` paths resolve from the application root. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes a result loader with no path argument; the renderer can only load the schema-validated result path recorded from the active analysis process.
+
+### CP3 application verification
+
+Launch Electron from the PowerShell session containing the API key:
+
+```powershell
+$env:GEMINI_API_KEY = 'your-key-from-Google-AI-Studio'
+npm start
+```
+
+1. Open or create a project, select **Open Video**, and choose `cp2-manual\short-cfr-video.mp4`.
+2. Select **Detect Vehicles**. The status should advance through Creating proxy, Uploading, Processing, Analyzing, and Parsing results; Analyzing should show a token count.
+3. On completion, real detections should replace the fixture data in both the timeline and Analysis panel. The status should report the detection count, and **Save Changes** should be enabled.
+4. Select **Save Changes**, choose a `.vproj.json` path if prompted, then use **Load Project** to confirm the same detections return.
+5. Edit one detection, run **Detect Vehicles** again, and wait for completion. The overwrite prompt should offer **Save**, **Discard**, and **Cancel**. Cancel keeps the edited detections; Discard replaces them with the new model results; Save writes the current detections before replacement.
 
 ## Timeline Core
 
@@ -143,7 +178,7 @@ Timeline zoom and horizontal scrolling are not implemented yet; that work is def
 
 The Analysis panel lists each appearance in chronological order. Start, end, car number, vehicle description, and subject status are editable; confidence remains read-only.
 
-- Start and end use `MM:SS`, validate against the video duration, and update the timeline immediately.
+- Start and end use `MM:SS` or `MM:SS.sss`, validate against the exact video duration, and update the timeline immediately.
 - Vehicle Description has an expand control for multiline editing in a larger dialog.
 - Selecting a timeline interval highlights the matching panel card.
 - Selecting a panel card highlights the matching timeline interval and scrolls the card into view.
@@ -156,7 +191,7 @@ Phase 3 uses `fixtures/sample_detections.json` as temporary renderer-side analys
 
 The fixture deliberately includes:
 
-- Five appearances with integer-second boundaries
+- Five appearances, including fractional-second boundaries
 - Confidence values covering all three color buckets
 - One non-subject appearance
 - One overlapping pair for lane testing
@@ -173,12 +208,12 @@ This pathway is marked temporary in `renderer/app.js` and is scheduled to be rep
 {
   "version": 1,
   "videoPath": "C:\\path\\to\\video.mp4",
-  "videoDurationS": 114,
+  "videoDurationS": 114.933,
   "detections": [
     {
       "car_number": "27/72",
-      "start_s": 8,
-      "end_s": 22,
+      "start_s": 8.25,
+      "end_s": 22.75,
       "subject": true,
       "confidence": 0.93,
       "notes": "Red car entering from camera left"
@@ -195,6 +230,7 @@ The isolated preload API exposes `saveProject({ project, filePath, projectDirect
 ## Project Layout
 
 - `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
+- `config.json` - Python, analysis-script, ffmpeg, and offline-stub selection
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup
 - `renderer/app.js` - renderer application state and view coordination

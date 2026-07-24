@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import io
 import json
 import os
 from pathlib import Path
+import random
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import config
 from .schema import RunConfig, RunMeta
@@ -52,6 +54,72 @@ RESPONSE_JSON_SCHEMA = {
 }
 
 
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    """Hold a small cross-process lock while updating request history."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    locked = False
+    try:
+        if handle.seek(0, os.SEEK_END) == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        if locked:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
+def _load_rate_history(state_path: Path) -> dict[str, list[float]]:
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    history: dict[str, list[float]] = {}
+    for model, timestamps in data.items():
+        if not isinstance(model, str) or not isinstance(timestamps, list):
+            continue
+        history[model] = [
+            float(timestamp)
+            for timestamp in timestamps
+            if isinstance(timestamp, (int, float))
+        ]
+    return history
+
+
+def _write_rate_history(state_path: Path, history: dict[str, list[float]]) -> None:
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = state_path.with_name(f".{state_path.name}.{os.getpid()}.tmp")
+    try:
+        temporary_path.write_text(json.dumps(history), encoding="utf-8")
+        temporary_path.replace(state_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
 class _ProgressReader(io.BufferedReader):
     def __init__(self, path: Path, observer: Observer) -> None:
         super().__init__(path.open("rb"))
@@ -78,14 +146,15 @@ class GeminiClient:
         model: str = config.MODEL,
         dry_run: bool = False,
         observer: Observer | None = None,
+        rate_limit_path: Path | None = None,
     ) -> None:
         self.model = model
         self.raw_dir = raw_dir
         self.dry_run = dry_run
         self.observer = observer or (lambda _event, _payload: None)
+        self.rate_limit_path = rate_limit_path or config.rate_limit_path()
         self._client = None
         self._uploaded_file = None
-        self._request_times: list[float] = []
 
         if dry_run:
             return
@@ -151,8 +220,6 @@ class GeminiClient:
         run_config: RunConfig,
         run_id: str,
     ) -> tuple[str, RunMeta]:
-        if run_config.temperature != 0:
-            raise ValueError("temperature must be 0")
         if run_config.fps is None:
             raise ValueError("fps must be explicit")
 
@@ -172,11 +239,13 @@ class GeminiClient:
         from google.genai import types
 
         generation_config = types.GenerateContentConfig(
-            temperature=run_config.temperature,
             seed=config.SEED,
             media_resolution=getattr(types.MediaResolution, run_config.media_resolution),
             response_mime_type="application/json",
             response_json_schema=RESPONSE_JSON_SCHEMA,
+            http_options=types.HttpOptions(
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         )
         video_part = types.Part(
             file_data=types.FileData(
@@ -185,7 +254,7 @@ class GeminiClient:
             ),
             video_metadata=types.VideoMetadata(fps=run_config.fps),
         )
-        text, input_tokens, output_tokens = self._generate_with_retry(
+        text, input_tokens, output_tokens, call_count = self._generate_with_retry(
             [video_part, prompt], generation_config
         )
         self._write_raw(raw_path, text)
@@ -193,7 +262,7 @@ class GeminiClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_s=time.monotonic() - started,
-            call_count=1,
+            call_count=call_count,
             raw_paths=[os.fspath(raw_path.resolve())],
         )
 
@@ -201,12 +270,17 @@ class GeminiClient:
         self,
         contents: list[Any],
         generation_config: Any,
-    ) -> tuple[str, int, int]:
+    ) -> tuple[str, int, int, int]:
         from google.genai import errors
 
         last_error: Exception | None = None
-        for attempt in range(config.MAX_RETRIES_429 + 1):
+        for attempt in range(config.MAX_REQUEST_ATTEMPTS):
             self._throttle()
+            if attempt > 0:
+                self.observer(
+                    "retry_start",
+                    {"attempt": attempt + 1, "maxAttempts": config.MAX_REQUEST_ATTEMPTS},
+                )
             try:
                 response = self._client.models.generate_content(
                     model=self.model,
@@ -220,16 +294,40 @@ class GeminiClient:
                     "tokens",
                     {"inputTokens": input_tokens, "outputTokens": output_tokens},
                 )
-                return getattr(response, "text", "") or "", input_tokens, output_tokens
-            except errors.ClientError as error:
-                if getattr(error, "code", None) != 429:
-                    raise
+                return (
+                    getattr(response, "text", "") or "",
+                    input_tokens,
+                    output_tokens,
+                    attempt + 1,
+                )
+            except errors.APIError as error:
+                status_code = int(getattr(error, "code", 0) or 0)
                 last_error = error
-                if attempt >= config.MAX_RETRIES_429:
-                    break
+                if (
+                    status_code not in config.RETRYABLE_STATUS_CODES
+                    or attempt + 1 >= config.MAX_REQUEST_ATTEMPTS
+                ):
+                    raise
+
                 delay = self._retry_delay(error, attempt)
-                print(f"Gemini rate-limited the request; retrying in {delay:.0f}s", file=sys.stderr)
+                next_attempt = attempt + 2
+                self.observer(
+                    "retry_wait",
+                    {
+                        "statusCode": status_code,
+                        "delayS": round(delay, 3),
+                        "attempt": next_attempt,
+                        "maxAttempts": config.MAX_REQUEST_ATTEMPTS,
+                    },
+                )
+                reason = self._retry_reason(status_code)
+                print(
+                    f"{reason}; retrying in {delay:.1f}s "
+                    f"(attempt {next_attempt}/{config.MAX_REQUEST_ATTEMPTS})",
+                    file=sys.stderr,
+                )
                 time.sleep(delay)
+
         assert last_error is not None
         raise last_error
 
@@ -237,13 +335,42 @@ class GeminiClient:
         limit = config.REQUESTS_PER_MINUTE
         if limit <= 0:
             return
-        now = time.time()
-        self._request_times = [stamp for stamp in self._request_times if now - stamp < config.RATE_WINDOW_S]
-        if len(self._request_times) >= limit:
-            delay = config.RATE_WINDOW_S - (now - min(self._request_times)) + config.RATE_MARGIN_S
-            if delay > 0:
-                time.sleep(delay)
-        self._request_times.append(time.time())
+
+        lock_path = self.rate_limit_path.with_name(f"{self.rate_limit_path.name}.lock")
+        while True:
+            with _exclusive_file_lock(lock_path):
+                now = time.time()
+                history = _load_rate_history(self.rate_limit_path)
+                recent = sorted(
+                    timestamp
+                    for timestamp in history.get(self.model, [])
+                    if 0 <= now - timestamp < config.RATE_WINDOW_S
+                )
+
+                spacing_delay = 0.0
+                if recent:
+                    spacing_delay = config.MIN_REQUEST_INTERVAL_S - (now - recent[-1])
+
+                window_delay = 0.0
+                if len(recent) >= limit:
+                    window_delay = config.RATE_WINDOW_S - (now - recent[-limit])
+
+                delay = max(0.0, spacing_delay, window_delay)
+                if delay <= 0:
+                    recent.append(now)
+                    history[self.model] = recent
+                    _write_rate_history(self.rate_limit_path, history)
+                    return
+
+            delay += config.RATE_MARGIN_S
+            self.observer(
+                "rate_limit_wait",
+                {
+                    "delayS": round(delay, 3),
+                    "requestsPerMinute": limit,
+                },
+            )
+            time.sleep(delay)
 
     @staticmethod
     def _retry_delay(error: Exception, attempt: int) -> float:
@@ -255,11 +382,25 @@ class GeminiClient:
                     server_delay = float(str(item.get("retryDelay", "")).rstrip("s"))
         except (AttributeError, TypeError, ValueError):
             server_delay = None
-        return (
-            server_delay + config.RATE_MARGIN_S
-            if server_delay is not None
-            else min(5.0 * (2**attempt), 65.0)
-        )
+
+        if server_delay is not None:
+            delay = server_delay + config.RATE_MARGIN_S
+        else:
+            base_delay = min(
+                config.RETRY_INITIAL_DELAY_S * (2**attempt),
+                config.RETRY_MAX_DELAY_S,
+            )
+            jitter = base_delay * config.RETRY_JITTER_RATIO
+            delay = random.uniform(base_delay - jitter, base_delay + jitter)
+        return max(config.MIN_REQUEST_INTERVAL_S, delay)
+
+    @staticmethod
+    def _retry_reason(status_code: int) -> str:
+        if status_code == 429:
+            return "Gemini rate limit reached"
+        if status_code == 503:
+            return "Gemini is temporarily unavailable"
+        return f"Gemini returned transient HTTP {status_code}"
 
     def _write_raw(self, path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

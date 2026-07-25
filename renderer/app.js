@@ -128,6 +128,7 @@ Panel.init(
   {
     onSelect: (index) => setSelection(index),
     onEdit: editAppearanceField,
+    onDelete: deleteAppearance,
   }
 );
 

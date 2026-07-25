@@ -7,6 +7,7 @@ const Panel = (() => {
   let listEl = null;
   let onSelect = null;
   let onEdit = null;
+  let onDelete = null;
   let descriptionDialog = null;
   let descriptionTextarea = null;
   let descriptionError = null;
@@ -104,6 +105,7 @@ const Panel = (() => {
     listEl = els.list;
     onSelect = callbacks.onSelect;
     onEdit = callbacks.onEdit;
+    onDelete = callbacks.onDelete;
     ensureDescriptionDialog();
   }
 
@@ -240,14 +242,32 @@ const Panel = (() => {
       const title = document.createElement('span');
       title.className = 'card-title';
       title.textContent = 'Appearance' + displayOrder;
+      const headerActions = document.createElement('div');
+      headerActions.className = 'card-header-actions';
       const confidence = document.createElement('span');
       confidence.className = 'card-confidence ' + Timeline.bucketFor(appearance.confidence).cls;
       confidence.textContent = appearance.confidence === null || appearance.confidence === undefined
         ? 'Not scored'
         : Math.round(appearance.confidence * 100) + '%';
       confidence.title = 'Confidence is read-only';
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.className = 'card-delete';
+      deleteButton.textContent = '\u00d7';
+      deleteButton.title = `Delete Appearance${displayOrder} interval`;
+      deleteButton.setAttribute('aria-label', `Delete Appearance${displayOrder} interval`);
+      deleteButton.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      deleteButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        onDelete(index);
+      });
+      headerActions.appendChild(confidence);
+      headerActions.appendChild(deleteButton);
       header.appendChild(title);
-      header.appendChild(confidence);
+      header.appendChild(headerActions);
 
       const timeFields = document.createElement('div');
       timeFields.className = 'card-time-fields';

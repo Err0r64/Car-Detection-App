@@ -166,8 +166,7 @@ window.addEventListener('keydown', (e) => {
 let currentProject = null;
 let currentProjectFilePath = null;
 let currentVideo = null;
-let fixtureAppearances = null;
-let pendingProjectLoad = null;
+let pendingDetections = null;
 let saveInProgress = false;
 let navigationInProgress = false;
 let analysisNeedsSave = false;
@@ -257,7 +256,7 @@ function exitToLanding() {
   currentProject = null;
   currentProjectFilePath = null;
   currentVideo = null;
-  pendingProjectLoad = null;
+  pendingDetections = null;
   saveInProgress = false;
   analysisNeedsSave = false;
   videoName.textContent = 'No Video Selected';
@@ -265,7 +264,6 @@ function exitToLanding() {
   videoPlayer.load();
   videoPlaceholder.textContent = 'Open a video to begin';
   videoPlaceholder.hidden = false;
-  fixtureAppearances = null;
   DetectionState.initialize([], 0);
   setSelection(null);
   timelineEl.hidden = true;
@@ -299,37 +297,12 @@ refreshProjectGrid();
 
 // --- Editor ---
 
-// TEMP Phase 3: replaced by real pipeline in Phase 5 — fixture data stands in
-// for analysis output. All times in the fixture are integer seconds.
-function initializeFixtureWhenReady() {
-  if (
-    pendingProjectLoad
-    || !currentVideo
-    || !fixtureAppearances
-    || !Number.isFinite(videoPlayer.duration)
-  ) return;
-  DetectionState.initialize(fixtureAppearances, videoPlayer.duration);
+function initializeDetectionsWhenReady() {
+  if (!pendingDetections || !currentVideo || !Number.isFinite(videoPlayer.duration)) return;
+  const detections = pendingDetections;
+  pendingDetections = null;
+  DetectionState.initialize(detections, videoPlayer.duration);
   setSelection(null);
-}
-
-function initializeProjectWhenReady() {
-  if (!pendingProjectLoad || !currentVideo || !Number.isFinite(videoPlayer.duration)) return;
-  const project = pendingProjectLoad;
-  pendingProjectLoad = null;
-  DetectionState.initialize(project.detections, videoPlayer.duration);
-  setSelection(null);
-}
-
-async function loadFixtureDetections() {
-  try {
-    const res = await fetch('../fixtures/sample_detections.json');
-    const fixture = await res.json();
-    fixtureAppearances = fixture.appearances || [];
-  } catch (err) {
-    console.error('Failed to load fixture detections:', err);
-    fixtureAppearances = [];
-  }
-  initializeFixtureWhenReady();
 }
 
 // Shows `video` ({ path, name, url }) in the player and enables the buttons
@@ -338,10 +311,9 @@ function showVideo(video, options = {}) {
   currentVideo = video;
   currentProjectFilePath = options.projectFilePath || null;
   analysisNeedsSave = false;
-  fixtureAppearances = null;
-  pendingProjectLoad = Array.isArray(options.detections)
-    ? { detections: options.detections }
-    : null;
+  pendingDetections = Array.isArray(options.detections)
+    ? options.detections
+    : [];
   DetectionState.initialize([], 0);
   setSelection(null);
   videoName.textContent = video.name;
@@ -349,15 +321,13 @@ function showVideo(video, options = {}) {
   videoPlaceholder.hidden = true;
   btnDetectVehicles.disabled = false;
   updateSaveButton(false);
-  if (!pendingProjectLoad) loadFixtureDetections();
 }
 
 videoPlayer.addEventListener('loadedmetadata', () => {
   if (!currentVideo) return;
   timelineEl.hidden = false;
   Timeline.setVideo(videoPlayer.duration);
-  initializeProjectWhenReady();
-  initializeFixtureWhenReady();
+  initializeDetectionsWhenReady();
 });
 
 window.addEventListener('resize', () => Timeline.handleResize());

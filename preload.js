@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('editorAPI', {
     ipcRenderer.invoke('confirm-unsaved-changes', videoName, destination),
   startAnalysis: (videoPath) => ipcRenderer.invoke('start-analysis', videoPath),
   loadAnalysisResults: () => ipcRenderer.invoke('load-analysis-results'),
+  discardAnalysisResults: () => ipcRenderer.invoke('discard-analysis-results'),
   cancelAnalysis: () => ipcRenderer.send('cancel-analysis'),
   onAnalysisEvent: (callback) => ipcRenderer.on('analysis-event', (e, data) => callback(data)),
   saveProject: (request) => ipcRenderer.invoke('save-project', request),

@@ -466,6 +466,7 @@ async function completeAnalysis(evt) {
   }
 
   if (!await resolveUnsavedChanges('analysis')) {
+    await window.editorAPI.discardAnalysisResults();
     statusStage.textContent = 'Analysis complete; existing detections kept';
     return;
   }

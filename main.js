@@ -3,11 +3,18 @@ const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
+const {
+  formatAnalysisFailure,
+  removeRunDirectory,
+  terminateProcessTree,
+  validateProtocolEvent,
+} = require('./analysis-lifecycle');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
   analyzeScript: 'pipeline/analyze.py',
   ffmpegPath: 'ffmpeg',
+  analysisTimeoutSeconds: 15 * 60,
   useDevStub: false,
 };
 
@@ -25,6 +32,15 @@ function readAnalysisConfig() {
   }
   if (typeof config.useDevStub !== 'boolean') {
     throw new Error('config.json useDevStub must be true or false.');
+  }
+  if (
+    !Number.isFinite(config.analysisTimeoutSeconds)
+    || config.analysisTimeoutSeconds <= 0
+    || config.analysisTimeoutSeconds > ANALYSIS_CONFIG_DEFAULTS.analysisTimeoutSeconds
+  ) {
+    throw new Error(
+      'config.json analysisTimeoutSeconds must be greater than 0 and no more than 900.'
+    );
   }
   return config;
 }
@@ -256,9 +272,9 @@ ipcMain.handle('load-project', async (event) => {
 // --- Analysis pipeline ---
 
 let analysisChild = null;
-let analysisCanceled = false;
 let analysisResultPath = null;
 let analysisRunDirectory = null;
+let terminateActiveAnalysis = null;
 
 function sameFilePath(left, right) {
   const normalize = (value) => {
@@ -271,6 +287,22 @@ function sameFilePath(left, right) {
     return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
   };
   return normalize(left) === normalize(right);
+}
+
+function cleanupAnalysisRunDirectory(directory = analysisRunDirectory) {
+  if (!directory) return true;
+  const error = removeRunDirectory(directory);
+  if (error) {
+    console.error(`Could not remove analysis work directory ${directory}: ${error.message}`);
+    return false;
+  }
+  if (analysisRunDirectory === directory) analysisRunDirectory = null;
+  return true;
+}
+
+function discardAnalysisResults() {
+  analysisResultPath = null;
+  return cleanupAnalysisRunDirectory();
 }
 
 function validateAnalysisResults(results) {
@@ -305,31 +337,47 @@ function validateAnalysisResults(results) {
 
 ipcMain.handle('load-analysis-results', () => {
   if (!analysisResultPath) return null;
+  const resultPath = analysisResultPath;
+  const runDirectory = analysisRunDirectory;
+  analysisResultPath = null;
   try {
-    const results = JSON.parse(fs.readFileSync(analysisResultPath, 'utf8'));
+    const results = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
     const validationError = validateAnalysisResults(results);
     if (validationError) throw new Error(validationError);
-    analysisResultPath = null;
     return results;
   } catch (err) {
-    dialog.showErrorBox('Analysis results unavailable', `Could not load analysis results:\n${err.message}`);
+    dialog.showErrorBox(
+      'Analysis results unavailable',
+      formatAnalysisFailure('parsing', `Could not load analysis results: ${err.message}`)
+    );
     return null;
+  } finally {
+    cleanupAnalysisRunDirectory(runDirectory);
   }
 });
 
+ipcMain.handle('discard-analysis-results', () => discardAnalysisResults());
+
 function killAnalysis() {
-  if (analysisChild) {
-    analysisCanceled = true;
-    analysisChild.kill();
-  }
+  if (terminateActiveAnalysis) terminateActiveAnalysis('canceled');
 }
 
 ipcMain.handle('start-analysis', (event, videoPath) => {
   if (analysisChild) return false;
 
-  const win = BrowserWindow.fromWebContents(event.sender);
+  if (analysisRunDirectory && !discardAnalysisResults()) {
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', 'Could not clean up the previous analysis run.')
+    );
+    return false;
+  }
+
   if (typeof videoPath !== 'string' || !fs.existsSync(videoPath)) {
-    dialog.showErrorBox('Analysis failed to start', 'The selected video file could not be found.');
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', 'The selected video file could not be found.')
+    );
     return false;
   }
 
@@ -337,59 +385,64 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
   try {
     config = readAnalysisConfig();
   } catch (err) {
-    dialog.showErrorBox('Invalid analysis configuration', err.message);
+    dialog.showErrorBox(
+      'Invalid analysis configuration',
+      formatAnalysisFailure('startup', err.message)
+    );
     return false;
   }
 
   if (!config.useDevStub && !process.env.GEMINI_API_KEY) {
     dialog.showErrorBox(
       'Gemini API key missing',
-      'Set GEMINI_API_KEY in the environment before starting the application.'
+      formatAnalysisFailure(
+        'startup',
+        'Set GEMINI_API_KEY in the environment before starting the application.'
+      )
     );
     return false;
   }
 
-  let args;
-  let expectedResultPath = null;
+  let scriptPath;
   if (config.useDevStub) {
-    try {
-      analysisRunDirectory = fs.mkdtempSync(
-        path.join(app.getPath('temp'), 'capstone-analysis-')
-      );
-    } catch (err) {
-      dialog.showErrorBox('Analysis failed to start', `Could not create a work directory:\n${err.message}`);
-      return false;
-    }
-    expectedResultPath = path.join(analysisRunDirectory, 'results.json');
-    args = [
+    scriptPath = path.join(__dirname, 'stub', 'fake_analysis.py');
+  } else {
+    scriptPath = resolveAppPath(config.analyzeScript);
+  }
+  if (!fs.existsSync(scriptPath)) {
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `The analysis script could not be found: ${scriptPath}`)
+    );
+    return false;
+  }
+
+  let runDirectory;
+  try {
+    runDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'capstone-analysis-'));
+  } catch (err) {
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `Could not create a work directory: ${err.message}`)
+    );
+    return false;
+  }
+
+  analysisRunDirectory = runDirectory;
+  const expectedResultPath = path.join(runDirectory, 'results.json');
+  const args = config.useDevStub
+    ? [
       '-u',
-      path.join(__dirname, 'stub', 'fake_analysis.py'),
+      scriptPath,
       videoPath,
       '--out',
       expectedResultPath,
-    ];
-    if (process.env.FAKE_ANALYSIS_FAIL) args.push('--fail');
-  } else {
-    const analyzeScript = resolveAppPath(config.analyzeScript);
-    if (!fs.existsSync(analyzeScript)) {
-      dialog.showErrorBox(
-        'Analysis failed to start',
-        `The configured analysis script could not be found:\n${analyzeScript}`
-      );
-      return false;
-    }
-    try {
-      analysisRunDirectory = fs.mkdtempSync(
-        path.join(app.getPath('temp'), 'capstone-analysis-')
-      );
-    } catch (err) {
-      dialog.showErrorBox('Analysis failed to start', `Could not create a work directory:\n${err.message}`);
-      return false;
-    }
-    expectedResultPath = path.join(analysisRunDirectory, 'results.json');
-    args = [
+      ...(process.env.FAKE_ANALYSIS_FAIL ? ['--fail'] : []),
+      ...(process.env.FAKE_ANALYSIS_MALFORMED ? ['--malformed'] : []),
+    ]
+    : [
       '-u',
-      analyzeScript,
+      scriptPath,
       '--video',
       videoPath,
       '--out',
@@ -397,7 +450,6 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
       '--ffmpeg-path',
       config.ffmpegPath,
     ];
-  }
 
   const sender = event.sender;
   const childEnvironment = { ...process.env };
@@ -408,107 +460,216 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
       'gemini-rate-limit.json'
     );
   }
-  const child = spawn(config.pythonPath, args, {
-    cwd: __dirname,
-    env: childEnvironment,
-    windowsHide: true,
-  });
+
+  let child;
+  try {
+    child = spawn(config.pythonPath, args, {
+      cwd: __dirname,
+      detached: process.platform !== 'win32',
+      env: childEnvironment,
+      windowsHide: true,
+    });
+  } catch (err) {
+    cleanupAnalysisRunDirectory(runDirectory);
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `Could not launch Python: ${err.message}`)
+    );
+    return false;
+  }
+
   analysisChild = child;
-  analysisCanceled = false;
   analysisResultPath = null;
 
-  let stdoutBuf = '';
+  let activeStage = 'startup';
+  let stdoutBuffer = '';
+  let stderrBuffer = '';
   let lastStderr = '';
-  let terminalEventSent = false;
+  let terminalKind = null;
+  let terminationReason = null;
+  let pendingDoneEvent = null;
+  let pendingFailure = null;
+  let timeoutTimer = null;
+  let forceKillTimer = null;
 
-  const sendTerminal = (terminalEvent, errorTitle) => {
-    if (terminalEventSent) return;
-    terminalEventSent = true;
-    sender.send('analysis-event', terminalEvent);
+  const clearRunTimers = () => {
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
+    if (forceKillTimer) {
+      clearTimeout(forceKillTimer);
+      forceKillTimer = null;
+    }
+  };
+
+  const sendEvent = (protocolEvent) => {
+    if (!sender.isDestroyed()) sender.send('analysis-event', protocolEvent);
+  };
+
+  const sendTerminal = (terminalEvent, errorTitle = null) => {
+    if (terminalKind) return;
+    terminalKind = terminalEvent.event;
+    sendEvent(terminalEvent);
     if (errorTitle) dialog.showErrorBox(errorTitle, terminalEvent.message);
   };
 
+  const sendFailure = (stage, message, errorTitle = 'Analysis failed') => {
+    sendTerminal(
+      {
+        event: 'error',
+        stage,
+        message: formatAnalysisFailure(stage, message, lastStderr),
+      },
+      errorTitle
+    );
+  };
+
+  const stopChild = (reason) => {
+    if (terminationReason) return;
+    terminationReason = reason;
+    if (timeoutTimer) {
+      clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+    }
+    forceKillTimer = terminateProcessTree(child);
+  };
+
+  terminateActiveAnalysis = (reason = 'canceled') => {
+    if (analysisChild !== child || terminalKind || terminationReason) return;
+    stopChild(reason);
+  };
+
+  const queueFailure = (stage, message) => {
+    if (pendingFailure || pendingDoneEvent || terminalKind || terminationReason) return;
+    pendingFailure = { stage, message };
+    stopChild('error');
+  };
+
   const forwardProtocolEvent = (protocolEvent) => {
+    if (terminationReason || terminalKind || pendingDoneEvent) return;
+    activeStage = protocolEvent.stage;
     if (protocolEvent.event === 'done') {
       if (
         typeof protocolEvent.resultsPath !== 'string'
         || !sameFilePath(protocolEvent.resultsPath, expectedResultPath)
         || !fs.existsSync(expectedResultPath)
       ) {
-        sendTerminal(
-          { event: 'error', stage: 'parsing', message: 'Analysis returned an invalid results path.' },
-          'Analysis failed'
-        );
+        queueFailure('parsing', 'Analysis returned an invalid results path.');
         return;
       }
-      analysisResultPath = expectedResultPath;
-      sendTerminal(config.useDevStub ? { ...protocolEvent, devStub: true } : protocolEvent);
+      pendingDoneEvent = config.useDevStub
+        ? { ...protocolEvent, devStub: true }
+        : protocolEvent;
       return;
     }
     if (protocolEvent.event === 'error') {
-      const stage = protocolEvent.stage ? `${protocolEvent.stage}: ` : '';
-      sendTerminal(
-        { ...protocolEvent, message: `${stage}${protocolEvent.message || 'Analysis failed.'}` },
-        'Analysis failed'
+      queueFailure(
+        protocolEvent.stage,
+        protocolEvent.message || 'Analysis failed.'
       );
       return;
     }
-    sender.send('analysis-event', protocolEvent);
+    sendEvent(protocolEvent);
+  };
+
+  const processProtocolLine = (line) => {
+    if (!line.trim() || terminationReason || terminalKind || pendingDoneEvent) return;
+    let protocolEvent;
+    try {
+      protocolEvent = JSON.parse(line);
+    } catch {
+      queueFailure(activeStage, 'Analysis emitted malformed JSONL progress output.');
+      return;
+    }
+    const validationError = validateProtocolEvent(protocolEvent);
+    if (validationError) {
+      queueFailure(activeStage, `Invalid analysis progress event: ${validationError}.`);
+      return;
+    }
+    forwardProtocolEvent(protocolEvent);
   };
 
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
-    stdoutBuf += chunk;
-    const lines = stdoutBuf.split('\n');
-    stdoutBuf = lines.pop();
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        forwardProtocolEvent(JSON.parse(line));
-      } catch {
-        // Protocol hardening for malformed output is handled in CP4.
-      }
-    }
+    stdoutBuffer += chunk;
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop();
+    for (const line of lines) processProtocolLine(line);
   });
 
   child.stderr.setEncoding('utf8');
   child.stderr.on('data', (chunk) => {
-    const text = chunk.trim();
-    if (text) lastStderr = text.split('\n').pop();
+    stderrBuffer += chunk;
+    const lines = stderrBuffer.split(/\r?\n/);
+    stderrBuffer = lines.pop();
+    for (const line of lines) {
+      const text = line.trim();
+      if (text) lastStderr = text;
+    }
   });
 
   child.on('error', (err) => {
-    analysisChild = null;
-    sendTerminal(
-      { event: 'error', message: `Could not launch Python: ${err.message}` },
-      'Analysis failed to start'
-    );
+    if (!pendingFailure && !terminalKind) {
+      pendingFailure = {
+        stage: 'startup',
+        message: `Could not launch Python: ${err.message}`,
+        title: 'Analysis failed to start',
+      };
+    }
   });
 
   child.on('close', (code) => {
-    analysisChild = null;
-    if (analysisCanceled) {
-      sendTerminal({ event: 'canceled' });
-    } else if (code === 0) {
-      if (!terminalEventSent) {
-        sendTerminal(
-          { event: 'error', message: 'Analysis exited without reporting a results file.' },
-          'Analysis failed'
-        );
-      }
-    } else if (!terminalEventSent) {
-      const message = `Analysis process exited with code ${code}${lastStderr ? `\n${lastStderr}` : ''}`;
-      sendTerminal({ event: 'error', message }, 'Analysis failed');
+    if (stderrBuffer.trim()) lastStderr = stderrBuffer.trim();
+    if (stdoutBuffer.trim() && !terminationReason && !terminalKind && !pendingDoneEvent) {
+      processProtocolLine(stdoutBuffer);
     }
+
+    clearRunTimers();
+    if (analysisChild === child) analysisChild = null;
+    if (terminateActiveAnalysis) terminateActiveAnalysis = null;
+
+    if (terminationReason === 'canceled') {
+      sendTerminal({ event: 'canceled' });
+    } else if (terminationReason === 'timeout') {
+      // The timeout callback already sent the visible terminal error.
+    } else if (pendingFailure) {
+      sendFailure(
+        pendingFailure.stage,
+        pendingFailure.message,
+        pendingFailure.title || 'Analysis failed'
+      );
+    } else if (pendingDoneEvent && code === 0) {
+      analysisResultPath = expectedResultPath;
+      sendTerminal(pendingDoneEvent);
+    } else if (code === 0) {
+      sendFailure(activeStage, 'Analysis exited without reporting a results file.');
+    } else {
+      sendFailure(activeStage, `Analysis process exited with code ${code}.`);
+    }
+
+    if (terminalKind !== 'done') cleanupAnalysisRunDirectory(runDirectory);
   });
+
+  timeoutTimer = setTimeout(() => {
+    if (analysisChild !== child || terminalKind || terminationReason) return;
+    sendFailure(
+      activeStage,
+      `Analysis timed out after ${config.analysisTimeoutSeconds} seconds.`
+    );
+    stopChild('timeout');
+  }, config.analysisTimeoutSeconds * 1000);
+  if (typeof timeoutTimer.unref === 'function') timeoutTimer.unref();
 
   return true;
 });
 
 ipcMain.on('cancel-analysis', () => killAnalysis());
 
-app.on('before-quit', () => killAnalysis());
-
+app.on('before-quit', () => {
+  killAnalysis();
+  if (!analysisChild) discardAnalysisResults();
+});
 // --- Window ---
 
 function createWindow() {

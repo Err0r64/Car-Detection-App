@@ -9,9 +9,9 @@ per line on stdout, following the frozen progress protocol:
 
 Stages run in order: proxy, upload, processing, analyzing, parsing.
 Exits 0 on success. Pass --fail to simulate a mid-run crash (exit 2 with a
-message on stderr), used to test the app's error dialog.
+message on stderr), or --malformed to emit an invalid JSONL protocol line.
 
-Usage: python fake_analysis.py [video_path] [--out results.json] [--fail]
+Usage: python fake_analysis.py [video_path] [--out results.json] [--fail] [--malformed]
 """
 
 import argparse
@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("video_path", nargs="?")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--fail", action="store_true")
+    parser.add_argument("--malformed", action="store_true")
     return parser.parse_args()
 
 
@@ -70,6 +71,9 @@ def main():
 
     for stage in STAGES:
         emit({"stage": stage, "event": "start"})
+
+        if args.malformed and stage == "processing":
+            print("not-json", flush=True)
 
         if stage == "analyzing":
             count = 0

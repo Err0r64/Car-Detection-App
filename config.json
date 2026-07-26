@@ -2,5 +2,6 @@
   "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
+  "analysisTimeoutSeconds": 900,
   "useDevStub": false
 }

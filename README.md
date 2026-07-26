@@ -2,7 +2,7 @@
 
 Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
 
-Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Phase 5 CP1-CP3 adds the standalone CFR proxy and Gemini pipeline plus real Electron integration. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
+Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Phase 5 CP1-CP4 adds the standalone CFR proxy and Gemini pipeline, real Electron integration, and hardened cancellation, timeout, cleanup, and error handling. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ npm start
 
 1. On the project selection screen, choose **New Project** and select a project folder, or open an existing project tile.
 2. To remove a tile, use its delete control. This only unregisters the project from the landing screen; it does not delete the project folder or any files on disk.
-3. In the editor, select **Open Video** and choose an MP4 or MOV file. The filename, native video controls, analysis panel, and timeline appear after the video metadata loads.
+3. In the editor, select **Open Video** and choose an MP4 or MOV file. The filename, native video controls, analysis panel, and an empty timeline appear after the video metadata loads.
 4. Select **Projects** to unload the current video and return to project selection.
 
 The project registry is stored as `projects.json` in Electron's user data directory.
@@ -40,7 +40,7 @@ Set `useDevStub` to `true` in `config.json`, then select **Detect Vehicles** to 
 4. `analyzing`
 5. `parsing`
 
-The editor displays the current stage, elapsed time, live token count during analysis, and a **Cancel** control. Canceling terminates the Python child process. On success, the stub writes one schema-valid canned detection and exercises the same result-loading path as real analysis.
+The editor displays the current stage, elapsed time, live token count during analysis, and a **Cancel** control. Canceling terminates the complete analysis process tree and removes its temporary work directory after exit. On success, the stub writes one schema-valid canned detection and exercises the same result-loading path as real analysis.
 
 To test the simulated failure path, keep `useDevStub` set to `true` and run:
 
@@ -49,7 +49,8 @@ $env:FAKE_ANALYSIS_FAIL = '1'
 npm start
 Remove-Item Env:FAKE_ANALYSIS_FAIL
 ```
-Restore `useDevStub` to `false` before testing or using real analysis.
+
+Set `FAKE_ANALYSIS_MALFORMED=1` instead to make the stub emit invalid JSONL and exercise protocol validation. Restore `useDevStub` to `false` before testing or using real analysis.
 
 ## Real Analysis Pipeline
 
@@ -136,11 +137,12 @@ The unique stages should be `analyzing`, `parsing`, `processing`, `proxy`, and `
   "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
+  "analysisTimeoutSeconds": 900,
   "useDevStub": false
 }
 ```
 
-Relative `analyzeScript` paths resolve from the application root. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes a result loader with no path argument; the renderer can only load the schema-validated result path recorded from the active analysis process.
+Relative `analyzeScript` paths resolve from the application root. `analysisTimeoutSeconds` defaults to and cannot exceed 900 seconds; lower positive values support timeout testing. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes result load/discard operations with no path argument, so the renderer can only consume the schema-validated result recorded for the active analysis run.
 
 ### CP3 application verification
 
@@ -153,9 +155,86 @@ npm start
 
 1. Open or create a project, select **Open Video**, and choose `cp2-manual\short-cfr-video.mp4`.
 2. Select **Detect Vehicles**. The status should advance through Creating proxy, Uploading, Processing, Analyzing, and Parsing results; Analyzing should show a token count.
-3. On completion, real detections should replace the fixture data in both the timeline and Analysis panel. The status should report the detection count, and **Save Changes** should be enabled.
+3. On completion, real detections should populate the timeline and Analysis panel. The status should report the detection count, and **Save Changes** should be enabled.
 4. Select **Save Changes**, choose a `.vproj.json` path if prompted, then use **Load Project** to confirm the same detections return.
 5. Edit one detection, run **Detect Vehicles** again, and wait for completion. The overwrite prompt should offer **Save**, **Discard**, and **Cancel**. Cancel keeps the edited detections; Discard replaces them with the new model results; Save writes the current detections before replacement.
+
+### CP4 application verification
+
+Run the automated lifecycle and pipeline regression tests first:
+
+```powershell
+npm test
+python -m unittest pipeline.tests.test_cp2
+```
+
+Both commands must pass. For the UI tests below, note the existing analysis work directories before each launch:
+
+```powershell
+$before = @(Get-ChildItem $env:TEMP -Directory -Filter 'capstone-analysis-*' -ErrorAction SilentlyContinue).FullName
+```
+
+#### Cancel and cleanup
+
+Set `useDevStub` to `true` and `analysisTimeoutSeconds` to `900` in `config.json`, then run `npm start`. Open a video and select **Detect Vehicles**. Select **Cancel** once while the status reads **Uploading**, then repeat in a fresh run while it reads **Analyzing**. In both runs, the analysis controls must return to idle without an error dialog. Close Electron and run:
+
+```powershell
+$after = @(Get-ChildItem $env:TEMP -Directory -Filter 'capstone-analysis-*' -ErrorAction SilentlyContinue).FullName
+Compare-Object $before $after
+Get-CimInstance Win32_Process | Where-Object {
+  $_.Name -match '^python(?:w)?\.exe$' -and
+  $_.CommandLine -match 'fake_analysis\.py|pipeline[\\/]analyze\.py'
+}
+```
+
+Both commands should print no rows. This confirms that the canceled run added no surviving work directory and left no analysis Python process.
+
+#### Forced failure and malformed protocol
+
+Keep stub mode enabled. Test the nonzero exit path:
+
+```powershell
+$env:FAKE_ANALYSIS_FAIL = '1'
+npm start
+Remove-Item Env:FAKE_ANALYSIS_FAIL
+```
+
+Run an analysis and wait for the dialog. It must identify the `processing` stage, exit code `2`, and the final stderr detail `simulated failure during processing stage`. Next test malformed stdout:
+
+```powershell
+$env:FAKE_ANALYSIS_MALFORMED = '1'
+npm start
+Remove-Item Env:FAKE_ANALYSIS_MALFORMED
+```
+
+The dialog must identify the `processing` stage and report malformed JSONL progress output. Repeat the directory and process checks from the cancellation test after closing Electron; both should remain empty.
+
+#### Timeout
+
+Keep stub mode enabled, set `analysisTimeoutSeconds` to `3`, and run `npm start`. Start an analysis and do not cancel it. After three seconds, a visible error must identify the current stage and state that analysis timed out after 3 seconds. The controls must return to idle, with no surviving work directory or Python process. Restore `analysisTimeoutSeconds` to `900` afterward.
+
+#### Missing key and unreachable API
+
+Set `useDevStub` to `false` and keep `analysisTimeoutSeconds` at `900`. In a PowerShell session without the key, run:
+
+```powershell
+Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
+npm start
+```
+
+Open a video and select **Detect Vehicles**. Analysis must not start, and the dialog must identify the `startup` stage and missing `GEMINI_API_KEY`.
+
+To exercise an unreachable API with a valid key while leaving the rest of the network unchanged, start Electron through a deliberately closed local proxy:
+
+```powershell
+$env:GEMINI_API_KEY = 'your-valid-key'
+$env:HTTPS_PROXY = 'http://127.0.0.1:9'
+$env:HTTP_PROXY = $env:HTTPS_PROXY
+npm start
+Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY
+```
+
+Run an analysis and wait for proxy generation to finish. The request must fail visibly in the `upload` stage with the connection failure included in the dialog. After closing Electron, the process and work-directory checks must again print no rows.
 
 ## Timeline Core
 
@@ -185,24 +264,11 @@ The Analysis panel lists each appearance in chronological order. Start, end, car
 - Only one appearance can be selected at a time.
 - Click empty timeline space or press `Escape` to clear the selection.
 
-## Temporary Detection Fixture
-
-Phase 3 uses `fixtures/sample_detections.json` as temporary renderer-side analysis output. The renderer fetches this file after a video is opened and passes its `appearances` array to the timeline and Analysis panel.
-
-The fixture deliberately includes:
-
-- Five appearances, including fractional-second boundaries
-- Confidence values covering all three color buckets
-- One non-subject appearance
-- One overlapping pair for lane testing
-
-This pathway is marked temporary in `renderer/app.js` and is scheduled to be replaced by real pipeline output in Phase 5. Editing the fixture and reopening the video is the current way to test alternate detection data.
-
 ## Project Save and Load
 
 **Save Changes** is disabled after loading and enables after the first successful edit. The first save opens a native save dialog; later saves silently overwrite that selected `.vproj.json` file. A successful save marks the detection state clean and disables the button again. Saving writes metadata only and never modifies the referenced video.
 
-**Load Project** validates the project file, verifies that its video still exists, reopens that video, restores all detections, and starts with a clean state. Project files use this versioned format:
+Opening a video directly initializes an empty detection list. **Load Project** validates the project file, verifies that its video still exists, reopens that video, restores all saved detections, and starts with a clean state. Project files use this versioned format:
 
 ```json
 {
@@ -230,14 +296,14 @@ The isolated preload API exposes `saveProject({ project, filePath, projectDirect
 ## Project Layout
 
 - `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
-- `config.json` - Python, analysis-script, ffmpeg, and offline-stub selection
+- `analysis-lifecycle.js` - protocol validation, staged error formatting, work-directory cleanup, and process-tree termination
+- `config.json` - Python, analysis-script, ffmpeg, timeout, and offline-stub selection
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup
 - `renderer/app.js` - renderer application state and view coordination
 - `renderer/timeline.js` - ruler, time mapping, playhead, seeking, interval layout, and timeline selection
 - `renderer/panel.js` - Analysis panel rendering and selection state
 - `renderer/style.css` - application, timeline, and panel styles
-- `fixtures/sample_detections.json` - temporary Phase 3 detection data
 - `stub/fake_analysis.py` - simulated analysis pipeline
 - `pipeline/analyze.py` - standalone real-analysis entry point and CFR proxy stage
 - `pipeline/gemini_harness/` - minimally adapted Gemini harness API, prompt, and response parser

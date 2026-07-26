@@ -9,6 +9,10 @@ const {
   terminateProcessTree,
   validateProtocolEvent,
 } = require('./analysis-lifecycle');
+const {
+  startSingleClipExport,
+  validateClipInterval,
+} = require('./clip-export');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
@@ -275,6 +279,7 @@ let analysisChild = null;
 let analysisResultPath = null;
 let analysisRunDirectory = null;
 let terminateActiveAnalysis = null;
+let activeExport = null;
 
 function sameFilePath(left, right) {
   const normalize = (value) => {
@@ -363,7 +368,7 @@ function killAnalysis() {
 }
 
 ipcMain.handle('start-analysis', (event, videoPath) => {
-  if (analysisChild) return false;
+  if (analysisChild || activeExport) return false;
 
   if (analysisRunDirectory && !discardAnalysisResults()) {
     dialog.showErrorBox(
@@ -666,8 +671,89 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
 
 ipcMain.on('cancel-analysis', () => killAnalysis());
 
+// --- Clip export ---
+
+ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
+  if (analysisChild || activeExport) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const options = {
+    title: 'Choose Export Folder',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  if (
+    typeof suggestedPath === 'string'
+    && suggestedPath
+    && fs.existsSync(suggestedPath)
+  ) {
+    options.defaultPath = suggestedPath;
+  }
+  const result = await dialog.showOpenDialog(win, options);
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+ipcMain.handle('export-selected-clip', async (_event, request) => {
+  if (analysisChild || activeExport) {
+    return { ok: false, error: 'Another analysis or export is already running.' };
+  }
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    return { ok: false, error: 'An export request is required.' };
+  }
+
+  const { videoPath, outputDirectory, interval } = request;
+  const intervalError = validateClipInterval(interval);
+  if (intervalError) return { ok: false, error: intervalError };
+  try {
+    if (typeof videoPath !== 'string' || !fs.statSync(videoPath).isFile()) {
+      return { ok: false, error: 'The original video file could not be found.' };
+    }
+  } catch {
+    return { ok: false, error: 'The original video file could not be found.' };
+  }
+  try {
+    if (typeof outputDirectory !== 'string' || !fs.statSync(outputDirectory).isDirectory()) {
+      return { ok: false, error: 'The selected export folder could not be found.' };
+    }
+  } catch {
+    return { ok: false, error: 'The selected export folder could not be found.' };
+  }
+
+  let config;
+  try {
+    config = readAnalysisConfig();
+  } catch (error) {
+    return { ok: false, error: `Invalid export configuration: ${error.message}` };
+  }
+
+  let run;
+  try {
+    run = startSingleClipExport({
+      ffmpegPath: config.ffmpegPath,
+      sourcePath: videoPath,
+      outputDirectory,
+      interval,
+    });
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+
+  activeExport = run;
+  try {
+    const result = await run.completion;
+    return { ok: true, ...result };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  } finally {
+    if (activeExport === run) activeExport = null;
+  }
+});
+
+function killExport() {
+  if (activeExport?.child) terminateProcessTree(activeExport.child);
+}
 app.on('before-quit', () => {
   killAnalysis();
+  killExport();
   if (!analysisChild) discardAnalysisResults();
 });
 // --- Window ---

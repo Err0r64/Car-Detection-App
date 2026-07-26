@@ -59,6 +59,32 @@
     </div>
   </section>
 
+  <dialog id="export-dialog" aria-labelledby="export-dialog-title">
+    <div class="export-dialog-content">
+      <h2 id="export-dialog-title">Export Clips</h2>
+
+      <label class="export-folder-field" for="export-folder-path">Output folder</label>
+      <div class="export-folder-row">
+        <input id="export-folder-path" type="text" readonly aria-label="Output folder" />
+        <button id="btn-choose-export-folder" type="button" class="dialog-button dialog-button-secondary">Choose Folder</button>
+      </div>
+
+      <fieldset class="export-scope">
+        <legend>Scope</legend>
+        <label><input type="radio" name="export-scope" value="all" disabled /> All intervals</label>
+        <label><input type="radio" name="export-scope" value="subject" disabled /> Subject only</label>
+        <label><input type="radio" name="export-scope" value="selected" checked /> Selected interval</label>
+      </fieldset>
+
+      <div id="export-count" class="export-count">0 clips</div>
+      <div id="export-status" class="export-status" role="status" hidden></div>
+
+      <div class="export-dialog-actions">
+        <button id="btn-export-dialog-cancel" type="button" class="dialog-button dialog-button-secondary">Cancel</button>
+        <button id="btn-start-export" type="button" class="dialog-button dialog-button-primary" disabled>Start Export</button>
+      </div>
+    </div>
+  </dialog>
   <script src="state.js"></script>
   <script src="timeline.js"></script>
   <script src="panel.js"></script>

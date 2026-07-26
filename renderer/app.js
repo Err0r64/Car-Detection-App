@@ -22,6 +22,13 @@ const statusStage = document.getElementById('status-stage');
 const statusElapsed = document.getElementById('status-elapsed');
 const statusTokens = document.getElementById('status-tokens');
 const timelineEl = document.getElementById('timeline');
+const exportDialog = document.getElementById('export-dialog');
+const exportFolderPath = document.getElementById('export-folder-path');
+const btnChooseExportFolder = document.getElementById('btn-choose-export-folder');
+const exportCount = document.getElementById('export-count');
+const exportStatus = document.getElementById('export-status');
+const btnExportDialogCancel = document.getElementById('btn-export-dialog-cancel');
+const btnStartExport = document.getElementById('btn-start-export');
 
 // Shared selection state: index into DetectionState, or null.
 // Timeline bars and panel cards both set it and both reflect it.
@@ -31,6 +38,7 @@ function setSelection(index) {
   selectedAppearance = index;
   Timeline.setSelected(index);
   Panel.setSelected(index);
+  updateExportDialogState();
 }
 
 function isTextEntry(target) {
@@ -141,9 +149,12 @@ DetectionState.subscribe(({ detections, dirty }) => {
   Timeline.handleResize();
   setSelection(selectedAppearance);
   updateSaveButton(dirty);
+  updateExportButton();
 });
 
 window.addEventListener('keydown', (e) => {
+  if (exportDialog.open) return;
+
   if (e.key === 'Escape') {
     setSelection(null);
     return;
@@ -170,6 +181,8 @@ let pendingDetections = null;
 let saveInProgress = false;
 let navigationInProgress = false;
 let analysisNeedsSave = false;
+let exportRunning = false;
+let exportDirectory = null;
 
 function hasUnsavedWork() {
   return DetectionState.isDirty() || analysisNeedsSave;
@@ -179,11 +192,27 @@ function updateSaveButton(dirty = DetectionState.isDirty()) {
   btnSaveChanges.disabled = saveInProgress || !currentVideo || !(dirty || analysisNeedsSave);
 }
 
+function updateExportButton() {
+  const hasDetections = DetectionState.getDetections().length > 0;
+  btnExport.disabled = !currentVideo
+    || !hasDetections
+    || analysisRunning
+    || exportRunning
+    || navigationInProgress;
+}
+
+function updateAppControls() {
+  const busy = navigationInProgress || analysisRunning || exportRunning;
+  btnOpenVideo.disabled = busy;
+  btnLoadProject.disabled = busy;
+  btnBackToProjects.disabled = busy;
+  btnDetectVehicles.disabled = !currentVideo || busy;
+  updateExportButton();
+}
+
 function setNavigationInProgress(inProgress) {
   navigationInProgress = inProgress;
-  btnOpenVideo.disabled = inProgress || analysisRunning;
-  btnLoadProject.disabled = inProgress;
-  btnBackToProjects.disabled = inProgress;
+  updateAppControls();
 }
 
 async function resolveUnsavedChanges(destination) {
@@ -252,6 +281,7 @@ function enterEditor(project) {
 
 function exitToLanding() {
   if (analysisRunning) window.editorAPI.cancelAnalysis();
+  if (exportDialog.open) exportDialog.close();
   endAnalysisRun();
   currentProject = null;
   currentProjectFilePath = null;
@@ -259,6 +289,7 @@ function exitToLanding() {
   pendingDetections = null;
   saveInProgress = false;
   analysisNeedsSave = false;
+  exportRunning = false;
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
@@ -284,7 +315,7 @@ btnNewProject.addEventListener('click', async () => {
 });
 
 btnBackToProjects.addEventListener('click', async () => {
-  if (navigationInProgress) return;
+  if (analysisRunning || exportRunning || navigationInProgress) return;
   setNavigationInProgress(true);
   try {
     if (await resolveUnsavedChanges('projects')) exitToLanding();
@@ -319,7 +350,7 @@ function showVideo(video, options = {}) {
   videoName.textContent = video.name;
   videoPlayer.src = video.url;
   videoPlaceholder.hidden = true;
-  btnDetectVehicles.disabled = false;
+  updateAppControls();
   updateSaveButton(false);
 }
 
@@ -333,7 +364,7 @@ videoPlayer.addEventListener('loadedmetadata', () => {
 window.addEventListener('resize', () => Timeline.handleResize());
 
 btnOpenVideo.addEventListener('click', async () => {
-  if (analysisRunning || navigationInProgress) return;
+  if (analysisRunning || exportRunning || navigationInProgress) return;
   setNavigationInProgress(true);
   try {
     if (!await resolveUnsavedChanges('video')) return;
@@ -392,7 +423,7 @@ async function saveCurrentProject() {
 btnSaveChanges.addEventListener('click', saveCurrentProject);
 
 btnLoadProject.addEventListener('click', async () => {
-  if (analysisRunning || navigationInProgress) return;
+  if (analysisRunning || exportRunning || navigationInProgress) return;
   setNavigationInProgress(true);
   try {
     if (!await resolveUnsavedChanges('project')) return;
@@ -419,6 +450,86 @@ videoPlayer.addEventListener('error', () => {
   videoPlaceholder.textContent = `Could not play ${currentVideo.name}`;
 });
 
+// --- Clip export ---
+
+function selectedExportInterval() {
+  if (!Number.isInteger(selectedAppearance)) return null;
+  return DetectionState.getDetections()[selectedAppearance] || null;
+}
+
+function setExportStatus(message = '', kind = '') {
+  exportStatus.textContent = message;
+  exportStatus.hidden = message.length === 0;
+  exportStatus.className = 'export-status';
+  if (kind) exportStatus.classList.add(`export-status-${kind}`);
+}
+
+function updateExportDialogState() {
+  const interval = selectedExportInterval();
+  const clipCount = interval ? 1 : 0;
+  exportCount.textContent = `${clipCount} clip${clipCount === 1 ? '' : 's'}`;
+  exportFolderPath.value = exportDirectory || '';
+  exportFolderPath.placeholder = exportDirectory ? '' : 'No folder selected';
+  btnChooseExportFolder.disabled = exportRunning;
+  btnStartExport.disabled = exportRunning || !exportDirectory || !interval;
+  btnExportDialogCancel.disabled = exportRunning;
+}
+
+btnExport.addEventListener('click', () => {
+  if (btnExport.disabled) return;
+  setExportStatus();
+  btnExportDialogCancel.textContent = 'Cancel';
+  updateExportDialogState();
+  exportDialog.showModal();
+});
+
+btnChooseExportFolder.addEventListener('click', async () => {
+  if (exportRunning) return;
+  const folder = await window.editorAPI.chooseExportFolder(exportDirectory);
+  if (!folder) return;
+  exportDirectory = folder;
+  updateExportDialogState();
+});
+
+btnExportDialogCancel.addEventListener('click', () => {
+  if (!exportRunning) exportDialog.close();
+});
+
+exportDialog.addEventListener('cancel', (event) => {
+  if (exportRunning) event.preventDefault();
+});
+
+btnStartExport.addEventListener('click', async () => {
+  const interval = selectedExportInterval();
+  if (!currentVideo || !exportDirectory || !interval || exportRunning) return;
+
+  exportRunning = true;
+  setExportStatus('Exporting selected interval...');
+  updateExportDialogState();
+  updateAppControls();
+
+  let result;
+  try {
+    result = await window.editorAPI.exportSelectedClip({
+      videoPath: currentVideo.path,
+      outputDirectory: exportDirectory,
+      interval,
+    });
+  } catch (error) {
+    result = { ok: false, error: error.message };
+  } finally {
+    exportRunning = false;
+    updateAppControls();
+    updateExportDialogState();
+  }
+
+  if (result?.ok) {
+    setExportStatus(`Exported ${result.filename}`, 'success');
+    btnExportDialogCancel.textContent = 'Close';
+  } else {
+    setExportStatus(result?.error || 'Clip export failed.', 'error');
+  }
+});
 // --- Analysis run ---
 
 // Stops the timer and restores idle button states; leaves the status line
@@ -430,12 +541,11 @@ function endAnalysisRun() {
     elapsedTimer = null;
   }
   btnCancel.hidden = true;
-  btnOpenVideo.disabled = navigationInProgress;
-  btnDetectVehicles.disabled = !currentVideo;
+  updateAppControls();
 }
 
 btnDetectVehicles.addEventListener('click', async () => {
-  if (!currentVideo || analysisRunning) return;
+  if (!currentVideo || analysisRunning || exportRunning) return;
   const started = await window.editorAPI.startAnalysis(currentVideo.path);
   if (!started) return;
 
@@ -446,8 +556,7 @@ btnDetectVehicles.addEventListener('click', async () => {
   statusTokens.textContent = '';
   statusLine.hidden = false;
   btnCancel.hidden = false;
-  btnDetectVehicles.disabled = true;
-  btnOpenVideo.disabled = true;
+  updateAppControls();
   elapsedTimer = setInterval(() => {
     statusElapsed.textContent = `${((Date.now() - analysisStart) / 1000).toFixed(1)}s`;
   }, 100);

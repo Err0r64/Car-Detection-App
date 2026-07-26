@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 CP1 adds selected-interval clip export and is awaiting manual confirmation.
 
 The following optional work remains intentionally deferred:
 
@@ -36,6 +36,58 @@ npm start
 4. Select **Projects** to unload the current video and return to project selection.
 
 The project registry is stored as `projects.json` in Electron's user data directory.
+
+## Selected Clip Export (Phase 6 CP1)
+
+Select an appearance in the timeline or Analysis panel, then select **Export**. The dialog accepts an output folder and shows the selected clip count. CP1 supports **Selected interval** only; **All intervals** and **Subject only** remain visible but disabled until CP2. **Start Export** remains disabled until both a selected interval and output folder are present.
+
+The main process cuts directly from `currentVideo.path`, which is the original video and never the analysis proxy. `clip-export.js` validates the bounds and runs the configured `ffmpegPath` sequentially with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
+
+The isolated preload API exposes `chooseExportFolder(suggestedPath)` and `exportSelectedClip({ videoPath, outputDirectory, interval })`. Analysis and export are mutually exclusive in both renderer controls and main-process IPC.
+
+### CP1 clip-export verification
+
+Prepare an empty output folder and launch Electron:
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\cp1-export-manual | Out-Null
+npm start
+```
+
+1. On the project landing screen, open a project tile or select **New Project** and choose a project folder.
+2. In the editor, select **Load Project** and open `cp2-manual\recovered-analysis.vproj.json`.
+3. Select the sole 12-15 second appearance in the timeline or Analysis panel, then select **Export**.
+4. Confirm the dialog reports `1 clip`, **Selected interval** is checked, and the other two scopes are disabled. Choose `cp1-export-manual` as the output folder and select **Start Export**.
+5. Confirm the dialog reports `Exported carUNK_12s-15s.mp4` and that the file is non-empty. Repeating the export should create `carUNK_12s-15s_2.mp4` without modifying the first file.
+
+Close Electron, then verify native resolution, frame rate, and duration:
+
+```powershell
+$source = (Resolve-Path '.\cp2-manual\short-cfr-video.mp4').Path
+$clip = (Resolve-Path '.\cp1-export-manual\carUNK_12s-15s.mp4').Path
+
+ffprobe -v error -select_streams v:0 `
+  -show_entries stream=width,height,avg_frame_rate `
+  -show_entries format=duration -of default=noprint_wrappers=1 $source
+ffprobe -v error -select_streams v:0 `
+  -show_entries stream=width,height,avg_frame_rate `
+  -show_entries format=duration -of default=noprint_wrappers=1 $clip
+```
+
+The source should report 1280x1120, 30/1 FPS, and 15 seconds. The clip must retain 1280x1120 and 30/1 FPS and report 3.000 seconds; one-frame tolerance is 0.0333 seconds. For an exact visual boundary check on this 30 FPS fixture, extract the expected source and exported boundary frames:
+
+```powershell
+ffmpeg -hide_banner -loglevel error -y -i $source `
+  -vf "select='eq(n,360)'" -frames:v 1 '.\cp1-export-manual\source-start.png'
+ffmpeg -hide_banner -loglevel error -y -i $clip `
+  -vf "select='eq(n,0)'" -frames:v 1 '.\cp1-export-manual\clip-start.png'
+ffmpeg -hide_banner -loglevel error -y -i $source `
+  -vf "select='eq(n,449)'" -frames:v 1 '.\cp1-export-manual\source-end.png'
+ffmpeg -hide_banner -loglevel error -y -i $clip `
+  -vf "select='eq(n,89)'" -frames:v 1 '.\cp1-export-manual\clip-end.png'
+```
+
+`source-start.png` and `clip-start.png` should show the same frame, as should `source-end.png` and `clip-end.png`, apart from minor H.264 re-encoding differences. Frames 360 through 449 are the 90 source frames in the half-open interval `[12, 15)`, so these checks validate both boundaries and the three-second duration.
 
 ## Stubbed (Mock) Analysis
 
@@ -303,6 +355,7 @@ The isolated preload API exposes `saveProject({ project, filePath, projectDirect
 ## Project Layout
 
 - `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
+- `clip-export.js` - validated filename construction, ffmpeg argument construction, atomic clip publication, and collision handling
 - `analysis-lifecycle.js` - protocol validation, staged error formatting, work-directory cleanup, and process-tree termination
 - `config.json` - Python, analysis-script, ffmpeg, timeout, and offline-stub selection
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`

@@ -2,7 +2,14 @@
 
 Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponsored by Apexiel. The application uses Electron and vanilla JavaScript with no frontend framework or bundler.
 
-Phase 2 established the secure Electron shell, project picker, local video playback, and stubbed analysis process. Phase 3 CP1-CP4 added the fit-to-width timeline, seeking, detection intervals, and synchronized Analysis panel. Phase 4 adds interval editing, creation/deletion with deletion undo, editable appearance metadata, dirty tracking, real project persistence, and unsaved-change protection when opening another video. Phase 5 CP1-CP4 adds the standalone CFR proxy and Gemini pipeline, real Electron integration, and hardened cancellation, timeout, cleanup, and error handling. Timeline zoom and horizontal scrolling (Phase 3 CP5) are intentionally deferred.
+## Project Status
+
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed.
+
+The following optional work remains intentionally deferred:
+
+- Phase 3 CP5: timeline zoom and horizontal scrolling
+- Phase 5 CP5 polish: a staged analysis checklist with per-stage durations, activity heartbeat, and soft-stall warning
 
 ## Prerequisites
 
@@ -54,7 +61,7 @@ Set `FAKE_ANALYSIS_MALFORMED=1` instead to make the stub emit invalid JSONL and 
 
 ## Real Analysis Pipeline
 
-Phase 5 CP2 provides the full standalone pipeline. Set the API key in the current PowerShell session and run it against a short CFR sample:
+The completed Phase 5 pipeline can also run independently of Electron. Set the API key in the current PowerShell session and run it against a short CFR sample:
 
 ```powershell
 $env:GEMINI_API_KEY = 'your-key-from-Google-AI-Studio'
@@ -159,7 +166,7 @@ npm start
 4. Select **Save Changes**, choose a `.vproj.json` path if prompted, then use **Load Project** to confirm the same detections return.
 5. Edit one detection, run **Detect Vehicles** again, and wait for completion. The overwrite prompt should offer **Save**, **Discard**, and **Cancel**. Cancel keeps the edited detections; Discard replaces them with the new model results; Save writes the current detections before replacement.
 
-### CP4 application verification
+### CP4 application verification (confirmed)
 
 Run the automated lifecycle and pipeline regression tests first:
 

@@ -29,6 +29,7 @@ const exportCount = document.getElementById('export-count');
 const exportStatus = document.getElementById('export-status');
 const btnExportDialogCancel = document.getElementById('btn-export-dialog-cancel');
 const btnStartExport = document.getElementById('btn-start-export');
+const exportScopeInputs = [...document.querySelectorAll('input[name="export-scope"]')];
 
 // Shared selection state: index into DetectionState, or null.
 // Timeline bars and panel cards both set it and both reflect it.
@@ -452,9 +453,16 @@ videoPlayer.addEventListener('error', () => {
 
 // --- Clip export ---
 
-function selectedExportInterval() {
-  if (!Number.isInteger(selectedAppearance)) return null;
-  return DetectionState.getDetections()[selectedAppearance] || null;
+function selectedExportScope() {
+  return exportScopeInputs.find((input) => input.checked)?.value || 'selected';
+}
+
+function selectedExportIntervals() {
+  return ExportScope.selectIntervals(
+    DetectionState.getDetections(),
+    selectedExportScope(),
+    selectedAppearance
+  );
 }
 
 function setExportStatus(message = '', kind = '') {
@@ -465,13 +473,14 @@ function setExportStatus(message = '', kind = '') {
 }
 
 function updateExportDialogState() {
-  const interval = selectedExportInterval();
-  const clipCount = interval ? 1 : 0;
+  const intervals = selectedExportIntervals();
+  const clipCount = intervals.length;
   exportCount.textContent = `${clipCount} clip${clipCount === 1 ? '' : 's'}`;
   exportFolderPath.value = exportDirectory || '';
   exportFolderPath.placeholder = exportDirectory ? '' : 'No folder selected';
+  exportScopeInputs.forEach((input) => { input.disabled = exportRunning; });
   btnChooseExportFolder.disabled = exportRunning;
-  btnStartExport.disabled = exportRunning || !exportDirectory || !interval;
+  btnStartExport.disabled = exportRunning || !exportDirectory || clipCount === 0;
   btnExportDialogCancel.disabled = exportRunning;
 }
 
@@ -481,6 +490,10 @@ btnExport.addEventListener('click', () => {
   btnExportDialogCancel.textContent = 'Cancel';
   updateExportDialogState();
   exportDialog.showModal();
+});
+
+exportScopeInputs.forEach((input) => {
+  input.addEventListener('change', updateExportDialogState);
 });
 
 btnChooseExportFolder.addEventListener('click', async () => {
@@ -500,20 +513,20 @@ exportDialog.addEventListener('cancel', (event) => {
 });
 
 btnStartExport.addEventListener('click', async () => {
-  const interval = selectedExportInterval();
-  if (!currentVideo || !exportDirectory || !interval || exportRunning) return;
+  const intervals = selectedExportIntervals();
+  if (!currentVideo || !exportDirectory || intervals.length === 0 || exportRunning) return;
 
   exportRunning = true;
-  setExportStatus('Exporting selected interval...');
+  setExportStatus(`Exporting ${intervals.length} clip${intervals.length === 1 ? '' : 's'}...`);
   updateExportDialogState();
   updateAppControls();
 
   let result;
   try {
-    result = await window.editorAPI.exportSelectedClip({
+    result = await window.editorAPI.exportClips({
       videoPath: currentVideo.path,
       outputDirectory: exportDirectory,
-      interval,
+      intervals,
     });
   } catch (error) {
     result = { ok: false, error: error.message };
@@ -524,7 +537,7 @@ btnStartExport.addEventListener('click', async () => {
   }
 
   if (result?.ok) {
-    setExportStatus(`Exported ${result.filename}`, 'success');
+    setExportStatus(`Exported ${result.count} clip${result.count === 1 ? '' : 's'}`, 'success');
     btnExportDialogCancel.textContent = 'Close';
   } else {
     setExportStatus(result?.error || 'Clip export failed.', 'error');

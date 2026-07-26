@@ -10,8 +10,8 @@ const {
   validateProtocolEvent,
 } = require('./analysis-lifecycle');
 const {
-  startSingleClipExport,
-  validateClipInterval,
+  startClipBatchExport,
+  validateClipIntervals,
 } = require('./clip-export');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
@@ -692,7 +692,7 @@ ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
   return result.filePaths[0];
 });
 
-ipcMain.handle('export-selected-clip', async (_event, request) => {
+ipcMain.handle('export-clips', async (_event, request) => {
   if (analysisChild || activeExport) {
     return { ok: false, error: 'Another analysis or export is already running.' };
   }
@@ -700,9 +700,9 @@ ipcMain.handle('export-selected-clip', async (_event, request) => {
     return { ok: false, error: 'An export request is required.' };
   }
 
-  const { videoPath, outputDirectory, interval } = request;
-  const intervalError = validateClipInterval(interval);
-  if (intervalError) return { ok: false, error: intervalError };
+  const { videoPath, outputDirectory, intervals } = request;
+  const intervalsError = validateClipIntervals(intervals);
+  if (intervalsError) return { ok: false, error: intervalsError };
   try {
     if (typeof videoPath !== 'string' || !fs.statSync(videoPath).isFile()) {
       return { ok: false, error: 'The original video file could not be found.' };
@@ -727,11 +727,11 @@ ipcMain.handle('export-selected-clip', async (_event, request) => {
 
   let run;
   try {
-    run = startSingleClipExport({
+    run = startClipBatchExport({
       ffmpegPath: config.ffmpegPath,
       sourcePath: videoPath,
       outputDirectory,
-      interval,
+      intervals,
     });
   } catch (error) {
     return { ok: false, error: error.message };

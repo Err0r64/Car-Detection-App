@@ -42,6 +42,17 @@ function validateClipInterval(interval) {
   return null;
 }
 
+function validateClipIntervals(intervals) {
+  if (!Array.isArray(intervals) || intervals.length === 0) {
+    return 'At least one interval is required for export.';
+  }
+  for (let index = 0; index < intervals.length; index += 1) {
+    const error = validateClipInterval(intervals[index]);
+    if (error) return `Interval ${index + 1}: ${error}`;
+  }
+  return null;
+}
+
 function findAvailableOutputPath(outputDirectory, filename, fsImpl = fs) {
   const extension = path.extname(filename);
   const stem = path.basename(filename, extension);
@@ -191,12 +202,41 @@ function startSingleClipExport(options) {
   return { child, partialPath, completion, args };
 }
 
+function startClipBatchExport(options) {
+  const {
+    intervals,
+    singleClipStarter = startSingleClipExport,
+    ...singleClipOptions
+  } = options;
+  const intervalsError = validateClipIntervals(intervals);
+  if (intervalsError) throw new Error(intervalsError);
+
+  const intervalSnapshots = intervals.map((interval) => ({ ...interval }));
+  const batch = { child: null, completion: null };
+  batch.completion = (async () => {
+    const clips = [];
+    for (const interval of intervalSnapshots) {
+      const run = singleClipStarter({ ...singleClipOptions, interval });
+      batch.child = run.child;
+      const result = await run.completion;
+      clips.push({ ...result, interval });
+    }
+    return { clips, count: clips.length };
+  })().finally(() => {
+    batch.child = null;
+  });
+
+  return batch;
+}
+
 module.exports = {
   buildClipFilename,
   buildFfmpegArgs,
   findAvailableOutputPath,
   formatTimestamp,
   sanitizeCarNumber,
+  startClipBatchExport,
   startSingleClipExport,
   validateClipInterval,
+  validateClipIntervals,
 };

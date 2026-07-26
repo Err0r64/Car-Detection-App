@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 CP1 adds selected-interval clip export and is awaiting manual confirmation.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 CP1 selected-interval export is manually confirmed; CP2 batch scope filtering is implemented and awaiting manual confirmation.
 
 The following optional work remains intentionally deferred:
 
@@ -37,15 +37,15 @@ npm start
 
 The project registry is stored as `projects.json` in Electron's user data directory.
 
-## Selected Clip Export (Phase 6 CP1)
+## Clip Export (Phase 6 CP1-CP2)
 
-Select an appearance in the timeline or Analysis panel, then select **Export**. The dialog accepts an output folder and shows the selected clip count. CP1 supports **Selected interval** only; **All intervals** and **Subject only** remain visible but disabled until CP2. **Start Export** remains disabled until both a selected interval and output folder are present.
+Select **Export** after detections are available. The dialog accepts an output folder and filters the current detection state by **All intervals**, **Subject only**, or **Selected interval**. Its clip count updates whenever the scope changes, including after edits to subject flags. **Start Export** remains disabled until the chosen scope contains at least one interval and an output folder is present.
 
-The main process cuts directly from `currentVideo.path`, which is the original video and never the analysis proxy. `clip-export.js` validates the bounds and runs the configured `ffmpegPath` sequentially with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
+The main process cuts directly from `currentVideo.path`, which is the original video and never the analysis proxy. `clip-export.js` validates the complete interval set, then runs one configured `ffmpegPath` process at a time with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
 
-The isolated preload API exposes `chooseExportFolder(suggestedPath)` and `exportSelectedClip({ videoPath, outputDirectory, interval })`. Analysis and export are mutually exclusive in both renderer controls and main-process IPC.
+The isolated preload API exposes `chooseExportFolder(suggestedPath)` and `exportClips({ videoPath, outputDirectory, intervals })`. Analysis and export are mutually exclusive in both renderer controls and main-process IPC.
 
-### CP1 clip-export verification
+### CP1 clip-export verification (confirmed)
 
 Prepare an empty output folder and launch Electron:
 
@@ -57,7 +57,7 @@ npm start
 1. On the project landing screen, open a project tile or select **New Project** and choose a project folder.
 2. In the editor, select **Load Project** and open `cp2-manual\recovered-analysis.vproj.json`.
 3. Select the sole 12-15 second appearance in the timeline or Analysis panel, then select **Export**.
-4. Confirm the dialog reports `1 clip`, **Selected interval** is checked, and the other two scopes are disabled. Choose `cp1-export-manual` as the output folder and select **Start Export**.
+4. Keep **Selected interval** checked and confirm the dialog reports `1 clip`. Choose `cp1-export-manual` as the output folder and select **Start Export**.
 5. Confirm the dialog reports `Exported carUNK_12s-15s.mp4` and that the file is non-empty. Repeating the export should create `carUNK_12s-15s_2.mp4` without modifying the first file.
 
 Close Electron, then verify native resolution, frame rate, and duration:
@@ -88,6 +88,58 @@ ffmpeg -hide_banner -loglevel error -y -i $clip `
 ```
 
 `source-start.png` and `clip-start.png` should show the same frame, as should `source-end.png` and `clip-end.png`, apart from minor H.264 re-encoding differences. Frames 360 through 449 are the 90 source frames in the half-open interval `[12, 15)`, so these checks validate both boundaries and the three-second duration.
+
+### CP2 batch-export verification
+
+Create a short local project with three intervals and three empty output folders. This uses the existing 15-second CFR sample and makes no Gemini request:
+
+```powershell
+$video = (Resolve-Path '.\cp2-manual\short-cfr-video.mp4').Path
+$testRoot = Join-Path (Resolve-Path '.\cp2-manual').Path 'cp2-export'
+if (Test-Path -LiteralPath $testRoot) {
+  throw "CP2 test output already exists: $testRoot"
+}
+New-Item -ItemType Directory -Path `
+  (Join-Path $testRoot 'all'), `
+  (Join-Path $testRoot 'subject'), `
+  (Join-Path $testRoot 'subject-edited') | Out-Null
+
+$project = [ordered]@{
+  version = 1
+  videoPath = $video
+  videoDurationS = 15
+  detections = @(
+    [ordered]@{ car_number = '29|33'; start_s = 1; end_s = 3; subject = $true; confidence = 0.93; notes = 'Subject interval' }
+    [ordered]@{ car_number = '14'; start_s = 4.5; end_s = 6; subject = $false; confidence = 0.72; notes = 'Non-subject interval' }
+    [ordered]@{ car_number = ''; start_s = 7.25; end_s = 9.75; subject = $true; confidence = $null; notes = 'Unknown car number' }
+  )
+  savedAt = (Get-Date).ToUniversalTime().ToString('o')
+}
+$projectPath = Join-Path $testRoot 'cp2-export-scopes.vproj.json'
+[IO.File]::WriteAllText(
+  $projectPath,
+  ($project | ConvertTo-Json -Depth 5),
+  [Text.UTF8Encoding]::new($false)
+)
+npm start
+```
+
+1. Open or create a landing-page project, select **Load Project**, and open `cp2-manual\cp2-export\cp2-export-scopes.vproj.json`.
+2. Select the first interval, open **Export**, and switch among the scopes. **All intervals** must show `3 clips`, **Subject only** must show `2 clips`, and **Selected interval** must show `1 clip`.
+3. Choose the `cp2-manual\cp2-export\all` folder, select **All intervals**, and start export. Expect `car29_33_1s-3s.mp4`, `car14_4.5s-6s.mp4`, and `carUNK_7.25s-9.75s.mp4`.
+4. Run **All intervals** again into the same folder. Expect matching `_2` files, with the original three files unchanged.
+5. Choose the `subject` folder and export **Subject only**. Expect only the `car29_33` and `carUNK` files; no `car14` file should exist.
+6. Close the dialog, enable **Subject appearance** on the `car14` interval, reopen **Export**, and confirm **Subject only** now shows `3 clips`. Export to `subject-edited` and confirm all three filenames are present.
+
+After closing Electron, list the results:
+
+```powershell
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'all') -File | Select-Object Name,Length
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject') -File | Select-Object Name,Length
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject-edited') -File | Select-Object Name,Length
+```
+
+Every listed file must be non-empty. The first folder should contain six files, the second two files, and the third three files.
 
 ## Stubbed (Mock) Analysis
 
@@ -363,6 +415,7 @@ The isolated preload API exposes `saveProject({ project, filePath, projectDirect
 - `renderer/app.js` - renderer application state and view coordination
 - `renderer/timeline.js` - ruler, time mapping, playhead, seeking, interval layout, and timeline selection
 - `renderer/panel.js` - Analysis panel rendering and selection state
+- `renderer/export-scope.js` - all, subject-only, and selected-interval filtering over detection snapshots
 - `renderer/style.css` - application, timeline, and panel styles
 - `stub/fake_analysis.py` - simulated analysis pipeline
 - `pipeline/analyze.py` - standalone real-analysis entry point and CFR proxy stage

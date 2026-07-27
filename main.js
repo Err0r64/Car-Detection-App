@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { pathToFileURL } = require('url');
@@ -12,6 +12,7 @@ const {
 const {
   startClipBatchExport,
   validateClipIntervals,
+  writeExportManifest,
 } = require('./clip-export');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
@@ -692,7 +693,7 @@ ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
   return result.filePaths[0];
 });
 
-ipcMain.handle('export-clips', async (_event, request) => {
+ipcMain.handle('export-clips', async (event, request) => {
   if (analysisChild || activeExport) {
     return { ok: false, error: 'Another analysis or export is already running.' };
   }
@@ -727,11 +728,18 @@ ipcMain.handle('export-clips', async (_event, request) => {
 
   let run;
   try {
+    const simulatedFailure = Number(process.env.CAPSTONE_EXPORT_FAIL_CLIP);
     run = startClipBatchExport({
       ffmpegPath: config.ffmpegPath,
       sourcePath: videoPath,
       outputDirectory,
       intervals,
+      simulateFailureAtClip: Number.isInteger(simulatedFailure) && simulatedFailure > 0
+        ? simulatedFailure
+        : null,
+      onEvent: (exportEvent) => {
+        if (!event.sender.isDestroyed()) event.sender.send('export-event', exportEvent);
+      },
     });
   } catch (error) {
     return { ok: false, error: error.message };
@@ -740,7 +748,20 @@ ipcMain.handle('export-clips', async (_event, request) => {
   activeExport = run;
   try {
     const result = await run.completion;
-    return { ok: true, ...result };
+    try {
+      const manifest = writeExportManifest({
+        outputDirectory,
+        sourcePath: videoPath,
+        summary: result,
+      });
+      return { ok: true, ...result, manifestPath: manifest.manifestPath };
+    } catch (error) {
+      return {
+        ok: false,
+        ...result,
+        error: `Clips finished, but the export manifest could not be written: ${error.message}`,
+      };
+    }
   } catch (error) {
     return { ok: false, error: error.message };
   } finally {
@@ -749,8 +770,25 @@ ipcMain.handle('export-clips', async (_event, request) => {
 });
 
 function killExport() {
-  if (activeExport?.child) terminateProcessTree(activeExport.child);
+  if (!activeExport) return false;
+  if (typeof activeExport.requestCancel === 'function') activeExport.requestCancel();
+  if (activeExport.child) terminateProcessTree(activeExport.child);
+  return true;
 }
+
+ipcMain.on('cancel-export', () => killExport());
+
+ipcMain.handle('open-export-folder', async (_event, folderPath) => {
+  try {
+    if (typeof folderPath !== 'string' || !fs.statSync(folderPath).isDirectory()) {
+      return { ok: false, error: 'The export folder could not be found.' };
+    }
+  } catch {
+    return { ok: false, error: 'The export folder could not be found.' };
+  }
+  const error = await shell.openPath(folderPath);
+  return error ? { ok: false, error } : { ok: true };
+});
 app.on('before-quit', () => {
   killAnalysis();
   killExport();

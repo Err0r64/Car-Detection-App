@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld('editorAPI', {
   chooseExportFolder: (suggestedPath) =>
     ipcRenderer.invoke('choose-export-folder', suggestedPath),
   exportClips: (request) => ipcRenderer.invoke('export-clips', request),
+  cancelExport: () => ipcRenderer.send('cancel-export'),
+  openExportFolder: (folderPath) => ipcRenderer.invoke('open-export-folder', folderPath),
+  onExportEvent: (callback) => ipcRenderer.on('export-event', (e, data) => callback(data)),
   onAnalysisEvent: (callback) => ipcRenderer.on('analysis-event', (e, data) => callback(data)),
   saveProject: (request) => ipcRenderer.invoke('save-project', request),
   loadProject: () => ipcRenderer.invoke('load-project'),

@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 CP1 selected-interval export is manually confirmed; CP2 batch scope filtering is implemented and awaiting manual confirmation.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 CP1 selected-interval export and CP2 batch scope filtering are manually confirmed; CP3 progress, cancellation, completion summaries, and manifests are implemented and awaiting manual confirmation.
 
 The following optional work remains intentionally deferred:
 
@@ -37,13 +37,15 @@ npm start
 
 The project registry is stored as `projects.json` in Electron's user data directory.
 
-## Clip Export (Phase 6 CP1-CP2)
+## Clip Export (Phase 6 CP1-CP3)
 
 Select **Export** after detections are available. The dialog accepts an output folder and filters the current detection state by **All intervals**, **Subject only**, or **Selected interval**. Its clip count updates whenever the scope changes, including after edits to subject flags. **Start Export** remains disabled until the chosen scope contains at least one interval and an output folder is present.
 
 The main process cuts directly from `currentVideo.path`, which is the original video and never the analysis proxy. `clip-export.js` validates the complete interval set, then runs one configured `ffmpegPath` process at a time with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
 
-The isolated preload API exposes `chooseExportFolder(suggestedPath)` and `exportClips({ videoPath, outputDirectory, intervals })`. Analysis and export are mutually exclusive in both renderer controls and main-process IPC.
+During export, ffmpeg's machine-readable progress stream drives current-clip and overall progress bars. Cancel requests terminate the active ffmpeg process tree, remove its hidden partial file, skip intervals that have not started, and still produce a partial completion summary. A failed clip is listed with its encoder error while the sequential batch continues. Every completed run writes `export_manifest.json` and the summary can open the selected output folder.
+
+The isolated preload API exposes `chooseExportFolder(suggestedPath)`, `exportClips({ videoPath, outputDirectory, intervals })`, `cancelExport()`, `onExportEvent(callback)`, and `openExportFolder(folderPath)`. Analysis and export are mutually exclusive in both renderer controls and main-process IPC.
 
 ### CP1 clip-export verification (confirmed)
 
@@ -134,13 +136,135 @@ npm start
 After closing Electron, list the results:
 
 ```powershell
-Get-ChildItem -LiteralPath (Join-Path $testRoot 'all') -File | Select-Object Name,Length
-Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject') -File | Select-Object Name,Length
-Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject-edited') -File | Select-Object Name,Length
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'all') -File -Filter '*.mp4' | Select-Object Name,Length
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject') -File -Filter '*.mp4' | Select-Object Name,Length
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'subject-edited') -File -Filter '*.mp4' | Select-Object Name,Length
 ```
 
-Every listed file must be non-empty. The first folder should contain six files, the second two files, and the third three files.
+Every listed clip must be non-empty. The first folder should contain six MP4 files, the second two, and the third three. Current CP3 builds also write one `export_manifest.json` per output folder; repeated runs replace that manifest without overwriting clips.
 
+### Export manifest format
+
+Each run writes `export_manifest.json` through a temporary file, then replaces the prior manifest in that run's output folder. `clips` is keyed by the actual collision-safe output filename, while `failures` records the intended filename and encoder reason. Interval fields are snapshots of the edited values sent to the main process.
+
+```json
+{
+  "version": 1,
+  "source_video": "C:\\path\\to\\original.mov",
+  "exported_at": "2026-07-26T00:00:00.000Z",
+  "canceled": false,
+  "total_intervals": 3,
+  "succeeded": 2,
+  "failed": 1,
+  "skipped": 0,
+  "clips": {
+    "car621_11.5s-40s.mp4": {
+      "car_number": "621",
+      "start_s": 11.5,
+      "end_s": 40,
+      "subject": true,
+      "confidence": 0.95,
+      "notes": "Blue sedan",
+      "size_bytes": 123456
+    }
+  },
+  "failures": [
+    {
+      "filename": "car14_40s-70s.mp4",
+      "car_number": "14",
+      "start_s": 40,
+      "end_s": 70,
+      "subject": false,
+      "confidence": 0.72,
+      "notes": "White hatchback",
+      "error": "ffmpeg exited with code 1. ..."
+    }
+  ]
+}
+```
+
+### CP3 progress, cancel, and summary verification
+
+Create a three-interval project and three empty output folders from the existing 1:54 sample. This setup does not run Gemini:
+
+```powershell
+$video = (Resolve-Path '.\Application_Dir\Dummy_0\GX010094_stabilized_resized.mov').Path
+$testRoot = Join-Path (Resolve-Path '.\cp2-manual').Path 'cp3-export'
+if (Test-Path -LiteralPath $testRoot) {
+  throw "CP3 test output already exists: $testRoot"
+}
+New-Item -ItemType Directory -Path `
+  (Join-Path $testRoot 'complete'), `
+  (Join-Path $testRoot 'cancel'), `
+  (Join-Path $testRoot 'failure') | Out-Null
+
+$project = [ordered]@{
+  version = 1
+  videoPath = $video
+  videoDurationS = 114.949
+  detections = @(
+    [ordered]@{ car_number = '621'; start_s = 11.5; end_s = 40; subject = $true; confidence = 0.95; notes = 'Blue sedan' }
+    [ordered]@{ car_number = '14'; start_s = 40; end_s = 70; subject = $false; confidence = 0.72; notes = 'White hatchback' }
+    [ordered]@{ car_number = '183'; start_s = 75; end_s = 95.5; subject = $true; confidence = 0.95; notes = 'Blue hatchback' }
+  )
+  savedAt = (Get-Date).ToUniversalTime().ToString('o')
+}
+$projectPath = Join-Path $testRoot 'cp3-progress.vproj.json'
+[IO.File]::WriteAllText(
+  $projectPath,
+  ($project | ConvertTo-Json -Depth 5),
+  [Text.UTF8Encoding]::new($false)
+)
+npm start
+```
+
+Normal run:
+
+1. Open or create a landing-page project, select **Load Project**, and open `cp2-manual\cp3-export\cp3-progress.vproj.json`.
+2. Select **Export**, choose the `complete` folder, select **All intervals**, and select **Start Export**.
+3. Confirm the current-clip percentage and bar advance for each filename and the overall bar advances across all three clips. Scope, folder, and editor controls must remain disabled while the run is active.
+4. Expect the message `3 clips exported`, three filenames under **Succeeded**, `None` under **Failed**, an `export_manifest.json` label, and these clips: `car621_11.5s-40s.mp4`, `car14_40s-70s.mp4`, and `car183_75s-95.5s.mp4`.
+5. Select **Open Folder** and confirm Windows Explorer opens the `complete` folder.
+
+Canceled run:
+
+1. Close the summary, reopen **Export**, choose the `cancel` folder, and start **All intervals**.
+2. After clip 1 completes and clip 2 begins, select **Cancel**. The control should change to **Canceling...** until ffmpeg exits.
+3. Expect an **Export canceled** summary. When cancellation occurs during clip 2, it should report `1 succeeded, 0 failed, 2 not attempted`; a boundary-timing click after clip 2 finishes may instead report `2 succeeded, 0 failed, 1 not attempted`.
+4. Confirm the in-flight clip is absent, no hidden `.partial.mp4` remains, and `export_manifest.json` has `"canceled": true` with matching counts.
+
+Close Electron and verify cleanup:
+
+```powershell
+Get-ChildItem -LiteralPath (Join-Path $testRoot 'cancel') -Recurse -Force |
+  Where-Object Name -Like '*.partial.*'
+Get-Process -Name ffmpeg -ErrorAction SilentlyContinue
+```
+
+Both commands should produce no output.
+
+Mixed-failure run:
+
+```powershell
+$env:CAPSTONE_EXPORT_FAIL_CLIP = '2'
+npm start
+```
+
+1. Load `cp2-manual\cp3-export\cp3-progress.vproj.json`, select **Export**, choose the `failure` folder, select **All intervals**, and start export.
+2. Clip 2 receives a deliberately invalid output path. Expect clip 1 to succeed, clip 2 to appear under **Failed** with an ffmpeg error, and clip 3 to continue and succeed.
+3. Expect the summary to report `2 succeeded and 1 failed`. **Open Folder** should show the `car621` and `car183` clips plus `export_manifest.json`, with no `car14` clip or partial file.
+4. Close Electron and clear the development-only failure hook:
+
+```powershell
+Remove-Item Env:CAPSTONE_EXPORT_FAIL_CLIP
+$manifest = Get-Content -LiteralPath (Join-Path $testRoot 'failure\export_manifest.json') -Raw |
+  ConvertFrom-Json
+$manifest | Select-Object canceled,total_intervals,succeeded,failed,skipped
+$manifest.clips.PSObject.Properties.Name
+$manifest.failures | Select-Object filename,error
+```
+
+The manifest should report `canceled=False`, `total_intervals=3`, `succeeded=2`, `failed=1`, and `skipped=0`. Its clip keys should be the `car621` and `car183` filenames, and its single failure should identify `car14_40s-70s.mp4`.
 ## Stubbed (Mock) Analysis
 
 Set `useDevStub` to `true` in `config.json`, then select **Detect Vehicles** to run `stub/fake_analysis.py` without an API key or network access. The process emits JSON Lines events for five simulated stages:

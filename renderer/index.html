@@ -79,6 +79,38 @@
       <div id="export-count" class="export-count">0 clips</div>
       <div id="export-status" class="export-status" role="status" hidden></div>
 
+      <div id="export-progress" class="export-progress" hidden>
+        <div class="export-progress-label">
+          <span>Overall</span>
+          <span id="export-overall-label">0 of 0 completed</span>
+        </div>
+        <progress id="export-overall-progress" max="1" value="0"></progress>
+        <div class="export-progress-label">
+          <span id="export-current-name">Waiting for ffmpeg</span>
+          <span id="export-current-percent">0%</span>
+        </div>
+        <progress id="export-clip-progress" max="1" value="0"></progress>
+      </div>
+
+      <section id="export-summary" class="export-summary" aria-labelledby="export-summary-title" hidden>
+        <h3 id="export-summary-title">Export complete</h3>
+        <p id="export-summary-message"></p>
+        <div class="export-summary-columns">
+          <div>
+            <h4>Succeeded</h4>
+            <ul id="export-success-list"></ul>
+          </div>
+          <div>
+            <h4>Failed</h4>
+            <ul id="export-failure-list"></ul>
+          </div>
+        </div>
+        <div class="export-summary-footer">
+          <span id="export-manifest-label"></span>
+          <button id="btn-open-export-folder" type="button" class="dialog-button dialog-button-secondary">Open Folder</button>
+        </div>
+      </section>
+
       <div class="export-dialog-actions">
         <button id="btn-export-dialog-cancel" type="button" class="dialog-button dialog-button-secondary">Cancel</button>
         <button id="btn-start-export" type="button" class="dialog-button dialog-button-primary" disabled>Start Export</button>

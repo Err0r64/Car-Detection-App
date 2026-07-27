@@ -30,6 +30,19 @@ const exportStatus = document.getElementById('export-status');
 const btnExportDialogCancel = document.getElementById('btn-export-dialog-cancel');
 const btnStartExport = document.getElementById('btn-start-export');
 const exportScopeInputs = [...document.querySelectorAll('input[name="export-scope"]')];
+const exportProgress = document.getElementById('export-progress');
+const exportOverallLabel = document.getElementById('export-overall-label');
+const exportOverallProgress = document.getElementById('export-overall-progress');
+const exportCurrentName = document.getElementById('export-current-name');
+const exportCurrentPercent = document.getElementById('export-current-percent');
+const exportClipProgress = document.getElementById('export-clip-progress');
+const exportSummary = document.getElementById('export-summary');
+const exportSummaryTitle = document.getElementById('export-summary-title');
+const exportSummaryMessage = document.getElementById('export-summary-message');
+const exportSuccessList = document.getElementById('export-success-list');
+const exportFailureList = document.getElementById('export-failure-list');
+const exportManifestLabel = document.getElementById('export-manifest-label');
+const btnOpenExportFolder = document.getElementById('btn-open-export-folder');
 
 // Shared selection state: index into DetectionState, or null.
 // Timeline bars and panel cards both set it and both reflect it.
@@ -183,6 +196,7 @@ let saveInProgress = false;
 let navigationInProgress = false;
 let analysisNeedsSave = false;
 let exportRunning = false;
+let exportCancelRequested = false;
 let exportDirectory = null;
 
 function hasUnsavedWork() {
@@ -291,6 +305,7 @@ function exitToLanding() {
   saveInProgress = false;
   analysisNeedsSave = false;
   exportRunning = false;
+  exportCancelRequested = false;
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
@@ -472,6 +487,66 @@ function setExportStatus(message = '', kind = '') {
   if (kind) exportStatus.classList.add(`export-status-${kind}`);
 }
 
+function resetExportRunView() {
+  exportProgress.hidden = true;
+  exportSummary.hidden = true;
+  exportOverallLabel.textContent = '0 of 0 completed';
+  exportOverallProgress.value = 0;
+  exportCurrentName.textContent = 'Waiting for ffmpeg';
+  exportCurrentPercent.textContent = '0%';
+  exportClipProgress.value = 0;
+  exportSummaryTitle.textContent = 'Export complete';
+  exportSummaryMessage.textContent = '';
+  exportSuccessList.replaceChildren();
+  exportFailureList.replaceChildren();
+  exportManifestLabel.textContent = '';
+}
+
+function appendExportSummaryItem(list, text, className = '') {
+  const item = document.createElement('li');
+  item.textContent = text;
+  if (className) item.className = className;
+  list.appendChild(item);
+}
+
+function renderExportSummary(result) {
+  const succeeded = Array.isArray(result.succeeded) ? result.succeeded : [];
+  const failed = Array.isArray(result.failed) ? result.failed : [];
+  exportProgress.hidden = true;
+  exportSummary.hidden = false;
+
+  if (result.canceled) {
+    exportSummaryTitle.textContent = 'Export canceled';
+    exportSummaryMessage.textContent = `${succeeded.length} succeeded, ${failed.length} failed, ${result.skipped || 0} not attempted.`;
+  } else if (failed.length > 0) {
+    exportSummaryTitle.textContent = 'Export completed with errors';
+    exportSummaryMessage.textContent = `${succeeded.length} succeeded and ${failed.length} failed.`;
+  } else {
+    exportSummaryTitle.textContent = 'Export complete';
+    exportSummaryMessage.textContent = `${succeeded.length} clip${succeeded.length === 1 ? '' : 's'} exported.`;
+  }
+
+  exportSuccessList.replaceChildren();
+  exportFailureList.replaceChildren();
+  if (succeeded.length === 0) {
+    appendExportSummaryItem(exportSuccessList, 'None', 'export-summary-empty');
+  } else {
+    succeeded.forEach((clip) => appendExportSummaryItem(exportSuccessList, clip.filename));
+  }
+  if (failed.length === 0) {
+    appendExportSummaryItem(exportFailureList, 'None', 'export-summary-empty');
+  } else {
+    failed.forEach((failure) => {
+      appendExportSummaryItem(exportFailureList, `${failure.filename}: ${failure.error}`);
+    });
+  }
+
+  exportManifestLabel.textContent = result.manifestPath
+    ? 'Manifest: export_manifest.json'
+    : 'Manifest unavailable';
+  btnOpenExportFolder.disabled = !exportDirectory;
+}
+
 function updateExportDialogState() {
   const intervals = selectedExportIntervals();
   const clipCount = intervals.length;
@@ -481,12 +556,18 @@ function updateExportDialogState() {
   exportScopeInputs.forEach((input) => { input.disabled = exportRunning; });
   btnChooseExportFolder.disabled = exportRunning;
   btnStartExport.disabled = exportRunning || !exportDirectory || clipCount === 0;
-  btnExportDialogCancel.disabled = exportRunning;
+  btnExportDialogCancel.disabled = exportRunning && exportCancelRequested;
+  btnOpenExportFolder.disabled = exportRunning || !exportDirectory;
+  if (exportRunning) {
+    btnExportDialogCancel.textContent = exportCancelRequested ? 'Canceling...' : 'Cancel';
+  }
 }
 
 btnExport.addEventListener('click', () => {
   if (btnExport.disabled) return;
+  exportCancelRequested = false;
   setExportStatus();
+  resetExportRunView();
   btnExportDialogCancel.textContent = 'Cancel';
   updateExportDialogState();
   exportDialog.showModal();
@@ -505,11 +586,60 @@ btnChooseExportFolder.addEventListener('click', async () => {
 });
 
 btnExportDialogCancel.addEventListener('click', () => {
-  if (!exportRunning) exportDialog.close();
+  if (!exportRunning) {
+    exportDialog.close();
+    return;
+  }
+  if (exportCancelRequested) return;
+  exportCancelRequested = true;
+  setExportStatus('Canceling export...');
+  window.editorAPI.cancelExport();
+  updateExportDialogState();
+});
+
+btnOpenExportFolder.addEventListener('click', async () => {
+  if (!exportDirectory || exportRunning) return;
+  const result = await window.editorAPI.openExportFolder(exportDirectory);
+  if (!result?.ok) setExportStatus(result?.error || 'Could not open the export folder.', 'error');
 });
 
 exportDialog.addEventListener('cancel', (event) => {
   if (exportRunning) event.preventDefault();
+});
+
+window.editorAPI.onExportEvent((event) => {
+  if (!exportRunning || !event || typeof event !== 'object') return;
+  if (event.event === 'start') {
+    exportProgress.hidden = false;
+    exportOverallLabel.textContent = `0 of ${event.total} completed`;
+    exportOverallProgress.value = 0;
+  } else if (event.event === 'clip-start') {
+    exportCurrentName.textContent = event.filename;
+    exportCurrentPercent.textContent = '0%';
+    exportClipProgress.value = 0;
+    exportOverallLabel.textContent = `${event.completed} of ${event.total} completed`;
+  } else if (event.event === 'progress') {
+    const clipFraction = Math.max(0, Math.min(1, Number(event.clipFraction) || 0));
+    const overallFraction = Math.max(0, Math.min(1, Number(event.overallFraction) || 0));
+    exportClipProgress.value = clipFraction;
+    exportOverallProgress.value = overallFraction;
+    exportCurrentPercent.textContent = `${Math.round(clipFraction * 100)}%`;
+  } else if (event.event === 'clip-success') {
+    exportClipProgress.value = 1;
+    exportCurrentPercent.textContent = '100%';
+    exportOverallProgress.value = event.completed / event.total;
+    exportOverallLabel.textContent = `${event.completed} of ${event.total} completed`;
+  } else if (event.event === 'clip-failure') {
+    exportOverallProgress.value = event.completed / event.total;
+    exportOverallLabel.textContent = `${event.completed} of ${event.total} completed`;
+    setExportStatus(`Failed ${event.filename}; continuing...`, 'warning');
+  } else if (event.event === 'canceling') {
+    setExportStatus('Canceling export...');
+  } else if (event.event === 'complete') {
+    exportOverallProgress.value = event.completed / event.total;
+    exportOverallLabel.textContent = `${event.completed} of ${event.total} completed`;
+    setExportStatus('Writing export manifest...');
+  }
 });
 
 btnStartExport.addEventListener('click', async () => {
@@ -517,6 +647,10 @@ btnStartExport.addEventListener('click', async () => {
   if (!currentVideo || !exportDirectory || intervals.length === 0 || exportRunning) return;
 
   exportRunning = true;
+  exportCancelRequested = false;
+  resetExportRunView();
+  exportProgress.hidden = false;
+  exportOverallLabel.textContent = `0 of ${intervals.length} completed`;
   setExportStatus(`Exporting ${intervals.length} clip${intervals.length === 1 ? '' : 's'}...`);
   updateExportDialogState();
   updateAppControls();
@@ -532,16 +666,29 @@ btnStartExport.addEventListener('click', async () => {
     result = { ok: false, error: error.message };
   } finally {
     exportRunning = false;
+    exportCancelRequested = false;
     updateAppControls();
     updateExportDialogState();
   }
 
+  if (Array.isArray(result?.succeeded) && Array.isArray(result?.failed)) {
+    renderExportSummary(result);
+  } else {
+    exportProgress.hidden = true;
+  }
+
   if (result?.ok) {
-    setExportStatus(`Exported ${result.count} clip${result.count === 1 ? '' : 's'}`, 'success');
-    btnExportDialogCancel.textContent = 'Close';
+    if (result.canceled) {
+      setExportStatus('Export canceled');
+    } else if (result.failed.length > 0) {
+      setExportStatus('Export completed with errors', 'warning');
+    } else {
+      setExportStatus('Export complete', 'success');
+    }
   } else {
     setExportStatus(result?.error || 'Clip export failed.', 'error');
   }
+  btnExportDialogCancel.textContent = 'Close';
 });
 // --- Analysis run ---
 

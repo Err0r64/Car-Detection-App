@@ -65,12 +65,28 @@ function findAvailableOutputPath(outputDirectory, filename, fsImpl = fs) {
   return candidate;
 }
 
+function parseFfmpegTimestamp(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(value.trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  const seconds = Number(match[3]);
+  if (![hours, minutes, seconds].every(Number.isFinite)) return null;
+  return (hours * 3600) + (minutes * 60) + seconds;
+}
+
 function buildFfmpegArgs(sourcePath, interval, outputPath) {
   return [
     '-hide_banner',
     '-loglevel',
     'error',
     '-nostdin',
+    '-nostats',
+    '-progress',
+    'pipe:1',
+    '-stats_period',
+    '0.25',
     '-n',
     '-ss',
     formatTimestamp(interval.start_s),
@@ -117,6 +133,7 @@ function startSingleClipExport(options) {
     fsImpl = fs,
     spawnProcess = spawn,
     randomId = () => crypto.randomUUID(),
+    onProgress = null,
   } = options;
 
   const intervalError = validateClipInterval(interval);
@@ -127,12 +144,23 @@ function startSingleClipExport(options) {
     `.${path.basename(filename, '.mp4')}.${randomId()}.partial.mp4`
   );
   const args = buildFfmpegArgs(sourcePath, interval, partialPath);
+  const clipDuration = interval.end_s - interval.start_s;
+
+  const reportProgress = (encodedSeconds) => {
+    if (typeof onProgress !== 'function') return;
+    const seconds = Math.max(0, Math.min(encodedSeconds, clipDuration));
+    try {
+      onProgress({ seconds, fraction: Math.min(1, seconds / clipDuration) });
+    } catch {
+      // Renderer progress reporting must not interrupt ffmpeg lifecycle handling.
+    }
+  };
 
   let child;
   try {
     child = spawnProcess(ffmpegPath, args, {
       windowsHide: true,
-      stdio: ['ignore', 'ignore', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
   } catch (error) {
     removePartialFile(partialPath, fsImpl);
@@ -142,6 +170,8 @@ function startSingleClipExport(options) {
   const completion = new Promise((resolve, reject) => {
     let settled = false;
     let stderrBuffer = '';
+    let progressBuffer = '';
+    let encodedSeconds = 0;
     let lastStderr = '';
 
     const fail = (error) => {
@@ -154,6 +184,29 @@ function startSingleClipExport(options) {
       }
       reject(error);
     };
+
+    const handleProgressLine = (line) => {
+      const separator = line.indexOf('=');
+      if (separator < 0) return;
+      const key = line.slice(0, separator);
+      const value = line.slice(separator + 1);
+      if (key === 'out_time') {
+        const parsed = parseFfmpegTimestamp(value);
+        if (parsed !== null) encodedSeconds = parsed;
+      } else if (key === 'progress') {
+        reportProgress(value === 'end' ? clipDuration : encodedSeconds);
+      }
+    };
+
+    if (child.stdout) {
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        progressBuffer += chunk;
+        const lines = progressBuffer.split(/\r?\n/);
+        progressBuffer = lines.pop();
+        lines.forEach(handleProgressLine);
+      });
+    }
 
     if (child.stderr) {
       child.stderr.setEncoding('utf8');
@@ -173,6 +226,7 @@ function startSingleClipExport(options) {
 
     child.on('close', (code) => {
       if (settled) return;
+      if (progressBuffer.trim()) handleProgressLine(progressBuffer.trim());
       if (stderrBuffer.trim()) lastStderr = stderrBuffer.trim();
       if (code !== 0) {
         const detail = lastStderr ? ` ${lastStderr}` : '';
@@ -188,6 +242,7 @@ function startSingleClipExport(options) {
         const outputPath = findAvailableOutputPath(outputDirectory, filename, fsImpl);
         fsImpl.renameSync(partialPath, outputPath);
         settled = true;
+        reportProgress(clipDuration);
         resolve({
           filename: path.basename(outputPath),
           outputPath,
@@ -202,41 +257,218 @@ function startSingleClipExport(options) {
   return { child, partialPath, completion, args };
 }
 
+function emitBatchEvent(onEvent, event) {
+  if (typeof onEvent !== 'function') return;
+  try {
+    onEvent(event);
+  } catch {
+    // A destroyed renderer must not interrupt batch cleanup or later clips.
+  }
+}
+
 function startClipBatchExport(options) {
   const {
     intervals,
     singleClipStarter = startSingleClipExport,
+    onEvent = null,
+    simulateFailureAtClip = null,
     ...singleClipOptions
   } = options;
   const intervalsError = validateClipIntervals(intervals);
   if (intervalsError) throw new Error(intervalsError);
 
   const intervalSnapshots = intervals.map((interval) => ({ ...interval }));
-  const batch = { child: null, completion: null };
+  const batch = {
+    child: null,
+    completion: null,
+    cancelRequested: false,
+    finished: false,
+    requestCancel() {
+      if (batch.finished || batch.cancelRequested) return false;
+      batch.cancelRequested = true;
+      emitBatchEvent(onEvent, { event: 'canceling' });
+      return true;
+    },
+  };
+
   batch.completion = (async () => {
-    const clips = [];
-    for (const interval of intervalSnapshots) {
-      const run = singleClipStarter({ ...singleClipOptions, interval });
-      batch.child = run.child;
-      const result = await run.completion;
-      clips.push({ ...result, interval });
+    const succeeded = [];
+    const failed = [];
+    const total = intervalSnapshots.length;
+    emitBatchEvent(onEvent, { event: 'start', total });
+
+    for (let index = 0; index < intervalSnapshots.length; index += 1) {
+      if (batch.cancelRequested) break;
+      const interval = intervalSnapshots[index];
+      const clipNumber = index + 1;
+      const intendedFilename = buildClipFilename(interval);
+      const completedBefore = succeeded.length + failed.length;
+      emitBatchEvent(onEvent, {
+        event: 'clip-start',
+        clipNumber,
+        total,
+        filename: intendedFilename,
+        completed: completedBefore,
+      });
+
+      const clipOptions = { ...singleClipOptions, interval };
+      if (clipNumber === simulateFailureAtClip) {
+        clipOptions.outputDirectory = path.join(
+          singleClipOptions.outputDirectory,
+          `.missing-export-${crypto.randomUUID()}`
+        );
+      }
+      clipOptions.onProgress = ({ seconds, fraction }) => {
+        emitBatchEvent(onEvent, {
+          event: 'progress',
+          clipNumber,
+          total,
+          filename: intendedFilename,
+          encodedSeconds: seconds,
+          clipFraction: fraction,
+          overallFraction: (completedBefore + fraction) / total,
+          completed: completedBefore,
+        });
+      };
+
+      try {
+        const run = singleClipStarter(clipOptions);
+        batch.child = run.child;
+        const result = await run.completion;
+        succeeded.push({ ...result, interval });
+        emitBatchEvent(onEvent, {
+          event: 'clip-success',
+          clipNumber,
+          total,
+          filename: result.filename,
+          completed: succeeded.length + failed.length,
+        });
+      } catch (error) {
+        if (batch.cancelRequested) break;
+        const message = error instanceof Error ? error.message : String(error);
+        failed.push({ filename: intendedFilename, interval, error: message });
+        emitBatchEvent(onEvent, {
+          event: 'clip-failure',
+          clipNumber,
+          total,
+          filename: intendedFilename,
+          error: message,
+          completed: succeeded.length + failed.length,
+        });
+      } finally {
+        batch.child = null;
+      }
     }
-    return { clips, count: clips.length };
+
+    const completed = succeeded.length + failed.length;
+    const summary = {
+      total,
+      count: succeeded.length,
+      clips: succeeded,
+      succeeded,
+      failed,
+      canceled: batch.cancelRequested,
+      completed,
+      skipped: total - completed,
+    };
+    batch.finished = true;
+    emitBatchEvent(onEvent, {
+      event: 'complete',
+      total,
+      succeeded: succeeded.length,
+      failed: failed.length,
+      canceled: summary.canceled,
+      completed,
+      skipped: summary.skipped,
+    });
+    return summary;
   })().finally(() => {
     batch.child = null;
+    batch.finished = true;
   });
 
   return batch;
 }
 
+function manifestIntervalFields(interval) {
+  return {
+    car_number: String(interval.car_number ?? ''),
+    start_s: interval.start_s,
+    end_s: interval.end_s,
+    subject: interval.subject === true,
+    confidence: interval.confidence ?? null,
+    notes: String(interval.notes ?? ''),
+  };
+}
+
+function buildExportManifest(sourcePath, summary, exportedAt = new Date().toISOString()) {
+  const clips = {};
+  for (const clip of summary.succeeded) {
+    clips[clip.filename] = {
+      ...manifestIntervalFields(clip.interval),
+      size_bytes: clip.sizeBytes,
+    };
+  }
+  return {
+    version: 1,
+    source_video: sourcePath,
+    exported_at: exportedAt,
+    canceled: summary.canceled,
+    total_intervals: summary.total,
+    succeeded: summary.succeeded.length,
+    failed: summary.failed.length,
+    skipped: summary.skipped,
+    clips,
+    failures: summary.failed.map((failure) => ({
+      filename: failure.filename,
+      ...manifestIntervalFields(failure.interval),
+      error: failure.error,
+    })),
+  };
+}
+
+function writeExportManifest(options) {
+  const {
+    outputDirectory,
+    sourcePath,
+    summary,
+    fsImpl = fs,
+    randomId = () => crypto.randomUUID(),
+    exportedAt,
+  } = options;
+  const manifest = buildExportManifest(sourcePath, summary, exportedAt);
+  const manifestPath = path.join(outputDirectory, 'export_manifest.json');
+  const partialPath = path.join(
+    outputDirectory,
+    `.export_manifest.${randomId()}.partial.json`
+  );
+
+  try {
+    fsImpl.writeFileSync(partialPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+    if (fsImpl.existsSync(manifestPath)) fsImpl.unlinkSync(manifestPath);
+    fsImpl.renameSync(partialPath, manifestPath);
+  } catch (error) {
+    try {
+      removePartialFile(partialPath, fsImpl);
+    } catch (cleanupError) {
+      error.message += ` Cleanup also failed: ${cleanupError.message}`;
+    }
+    throw error;
+  }
+  return { manifest, manifestPath };
+}
+
 module.exports = {
   buildClipFilename,
+  buildExportManifest,
   buildFfmpegArgs,
   findAvailableOutputPath,
   formatTimestamp,
+  parseFfmpegTimestamp,
   sanitizeCarNumber,
   startClipBatchExport,
   startSingleClipExport,
   validateClipInterval,
   validateClipIntervals,
+  writeExportManifest,
 };

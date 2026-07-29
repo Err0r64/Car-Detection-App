@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Installer/packaging CP1 creates a Windows unpacked build with installation-safe resource paths and is awaiting manual confirmation.
 
 The following optional work remains intentionally deferred:
 
@@ -28,6 +28,61 @@ npm install
 npm start
 ```
 
+## Windows Packaging (Installer Phase CP1)
+
+CP1 establishes the package boundary before creating an installer. `electron-builder.yml` places the Electron main and renderer code in `resources\app.asar`, while `config.json`, `detections.schema.json`, `pipeline`, and `stub` are copied to the external `resources` directory so system Python can execute them. Development builds continue resolving those files from the repository. The `runtime-paths.js` boundary selects the correct root in each environment.
+
+The unpacked build still expects Python and its pipeline packages, ffmpeg, and ffprobe on the host system. CP1 does not bundle those runtimes and does not produce an installer. The build uses a local staging directory because executable patching and ASAR cleanup are unreliable on the mapped `Z:` workspace.
+
+### CP1 packaged-build verification
+
+Install dependencies, run the automated tests, and create the unpacked Windows application:
+
+```powershell
+npm install
+npm test
+npm run pack:win
+
+$appRoot = Join-Path $env:LOCALAPPDATA 'CapstoneVideoEditorBuild\win-unpacked'
+Get-Item -LiteralPath `
+  (Join-Path $appRoot 'Capstone Video Editor.exe'), `
+  (Join-Path $appRoot 'resources\app.asar'), `
+  (Join-Path $appRoot 'resources\config.json'), `
+  (Join-Path $appRoot 'resources\pipeline\analyze.py'), `
+  (Join-Path $appRoot 'resources\stub\fake_analysis.py')
+Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
+```
+
+1. Confirm the packaged application opens directly to the project-selection screen without a console window or startup error.
+2. Open an existing project tile or select **New Project** and choose a project directory.
+3. Select **Open Video**, choose an MP4 or MOV file, and confirm the video, empty timeline, and editor controls load normally.
+4. Select **Projects** and confirm the application returns to project selection, then close the application through the window shell.
+
+To verify that the packaged app launches its external stub resource, close the application and enable the stub in the generated config:
+
+```powershell
+$configPath = Join-Path $appRoot 'resources\config.json'
+$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$config.useDevStub = $true
+[IO.File]::WriteAllText(
+  $configPath,
+  ($config | ConvertTo-Json -Depth 5),
+  [Text.UTF8Encoding]::new($false)
+)
+Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
+```
+
+Open a project and video, then select **Detect Vehicles**. Expect all five analysis stages to complete and one detection to appear without requiring `GEMINI_API_KEY` or making a network request. Close the application and restore the generated config:
+
+```powershell
+$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+$config.useDevStub = $false
+[IO.File]::WriteAllText(
+  $configPath,
+  ($config | ConvertTo-Json -Depth 5),
+  [Text.UTF8Encoding]::new($false)
+)
+```
 ## Application Flow
 
 1. On the project selection screen, choose **New Project** and select a project folder, or open an existing project tile.

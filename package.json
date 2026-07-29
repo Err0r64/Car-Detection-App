@@ -5,9 +5,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test --test-isolation=none"
+    "test": "node --test --test-isolation=none",
+    "pack:win": "node scripts/pack-win.js"
   },
   "devDependencies": {
-    "electron": "^37.2.0"
+    "electron": "^37.2.0",
+    "electron-builder": "^26.15.3"
   }
 }

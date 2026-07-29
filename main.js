@@ -14,6 +14,11 @@ const {
   validateClipIntervals,
   writeExportManifest,
 } = require('./clip-export');
+const {
+  resolveRuntimePath,
+  runtimeRoot,
+} = require('./runtime-paths');
+const { parseConfigJson } = require('./runtime-config');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
@@ -24,10 +29,10 @@ const ANALYSIS_CONFIG_DEFAULTS = {
 };
 
 function readAnalysisConfig() {
-  const configPath = path.join(__dirname, 'config.json');
+  const configPath = path.join(appResourceRoot(), 'config.json');
   let configured = {};
   if (fs.existsSync(configPath)) {
-    configured = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    configured = parseConfigJson(fs.readFileSync(configPath, 'utf8'));
   }
   const config = { ...ANALYSIS_CONFIG_DEFAULTS, ...configured };
   for (const key of ['pythonPath', 'analyzeScript', 'ffmpegPath']) {
@@ -50,10 +55,20 @@ function readAnalysisConfig() {
   return config;
 }
 
+function runtimePathOptions() {
+  return {
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appDirectory: __dirname,
+  };
+}
+
+function appResourceRoot() {
+  return runtimeRoot(runtimePathOptions());
+}
+
 function resolveAppPath(configuredPath) {
-  return path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.join(__dirname, configuredPath);
+  return resolveRuntimePath(configuredPath, runtimePathOptions());
 }
 // --- Project registry (userData/projects.json): [{ name, path }] ---
 
@@ -411,7 +426,7 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
 
   let scriptPath;
   if (config.useDevStub) {
-    scriptPath = path.join(__dirname, 'stub', 'fake_analysis.py');
+    scriptPath = path.join(appResourceRoot(), 'stub', 'fake_analysis.py');
   } else {
     scriptPath = resolveAppPath(config.analyzeScript);
   }
@@ -470,7 +485,7 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
   let child;
   try {
     child = spawn(config.pythonPath, args, {
-      cwd: __dirname,
+      cwd: appResourceRoot(),
       detached: process.platform !== 'win32',
       env: childEnvironment,
       windowsHide: true,

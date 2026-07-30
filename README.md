@@ -54,8 +54,8 @@ Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
 ```
 
 1. Confirm the packaged application opens directly to the project-selection screen without a console window or startup error.
-2. Open an existing project tile or select **New Project** and choose a project directory.
-3. Select **Open Video**, choose an MP4 or MOV file, and confirm the video, empty timeline, and editor controls load normally.
+2. Open an existing project tile or select the **+** action, enter a project name, and confirm the editor opens the new workspace under the displayed Project location.
+3. Select **Import Video**, choose an MP4 or MOV file, and confirm it is copied into the project `media` folder before the video, empty timeline, and editor controls load.
 4. Select **Projects** and confirm the application returns to project selection, then close the application through the window shell.
 
 To verify that the packaged app launches its external stub resource, close the application and enable the stub in the generated config:
@@ -85,18 +85,18 @@ $config.useDevStub = $false
 ```
 ## Application Flow
 
-1. On the project selection screen, choose **New Project** and select a project folder, or open an existing project tile.
+1. On the project selection screen, use **Change** to choose the persistent Project location if needed. Select **+**, enter a project name, or open an existing project tile.
 2. To remove a tile, use its delete control. This only unregisters the project from the landing screen; it does not delete the project folder or any files on disk.
-3. In the editor, select **Open Video** and choose an MP4 or MOV file. The filename, native video controls, analysis panel, and an empty timeline appear after the video metadata loads.
+3. In the editor, select **Import Video** and choose an MP4 or MOV file. The app copies it into `<project>\media` using a collision-safe filename, then loads the imported copy with native video controls and an empty timeline.
 4. Select **Projects** to unload the current video and return to project selection.
 
-The project registry is stored as `projects.json` in Electron's user data directory.
+The project registry is stored as `projects.json` in Electron's user data directory. The designated Project location is stored separately in `settings.json` and defaults to `Documents\Apexiel Projects`. Changing the location affects new projects only; existing registered project tiles keep their original paths. Each new project contains a `media` directory, and importing the same source filename again creates `name (2).ext`, `name (3).ext`, and later copies without overwriting existing media.
 
 ## Clip Export (Phase 6 CP1-CP3)
 
 Select **Export** after detections are available. The dialog accepts an output folder and filters the current detection state by **All intervals**, **Subject only**, or **Selected interval**. Its clip count updates whenever the scope changes, including after edits to subject flags. **Start Export** remains disabled until the chosen scope contains at least one interval and an output folder is present.
 
-The main process cuts directly from `currentVideo.path`, which is the original video and never the analysis proxy. `clip-export.js` validates the complete interval set, then runs one configured `ffmpegPath` process at a time with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
+The main process cuts directly from `currentVideo.path`, which is the source-quality copy in the project `media` folder and never the analysis proxy. `clip-export.js` validates the complete interval set, then runs one configured `ffmpegPath` process at a time with accurate input seeking, H.264 (`libx264`), `veryfast`, CRF 20, original dimensions, and copied audio when present. A successful temporary file is atomically published under `car{car_number|UNK}_{start}s-{end}s.mp4`; unsafe car-number characters become underscores and existing files receive `_2`, `_3`, and later suffixes rather than being overwritten. Fractional interval bounds are preserved to three decimal places in both the command and filename.
 
 During export, ffmpeg's machine-readable progress stream drives current-clip and overall progress bars. Cancel requests terminate the active ffmpeg process tree, remove its hidden partial file, skip intervals that have not started, and still produce a partial completion summary. A failed clip is listed with its encoder error while the sequential batch continues. Every completed run writes `export_manifest.json` and the summary can open the selected output folder.
 
@@ -111,7 +111,7 @@ New-Item -ItemType Directory -Force -Path .\cp1-export-manual | Out-Null
 npm start
 ```
 
-1. On the project landing screen, open a project tile or select **New Project** and choose a project folder.
+1. On the project landing screen, open a project tile or select **+** and enter a project name.
 2. In the editor, select **Load Project** and open `cp2-manual\recovered-analysis.vproj.json`.
 3. Select the sole 12-15 second appearance in the timeline or Analysis panel, then select **Export**.
 4. Keep **Selected interval** checked and confirm the dialog reports `1 clip`. Choose `cp1-export-manual` as the output folder and select **Start Export**.
@@ -443,7 +443,7 @@ $env:GEMINI_API_KEY = 'your-key-from-Google-AI-Studio'
 npm start
 ```
 
-1. Open or create a project, select **Open Video**, and choose `cp2-manual\short-cfr-video.mp4`.
+1. Open or create a project, select **Import Video**, and choose `cp2-manual\short-cfr-video.mp4`.
 2. Select **Detect Vehicles**. The status should advance through Creating proxy, Uploading, Processing, Analyzing, and Parsing results; Analyzing should show a token count.
 3. On completion, real detections should populate the timeline and Analysis panel. The status should report the detection count, and **Save Changes** should be enabled.
 4. Select **Save Changes**, choose a `.vproj.json` path if prompted, then use **Load Project** to confirm the same detections return.
@@ -558,7 +558,7 @@ The Analysis panel lists each appearance in chronological order. Start, end, car
 
 **Save Changes** is disabled after loading and enables after the first successful edit. The first save opens a native save dialog; later saves silently overwrite that selected `.vproj.json` file. A successful save marks the detection state clean and disables the button again. Saving writes metadata only and never modifies the referenced video.
 
-Opening a video directly initializes an empty detection list. **Load Project** validates the project file, verifies that its video still exists, reopens that video, restores all saved detections, and starts with a clean state. Project files use this versioned format:
+Importing a video copies the source into the active project and initializes an empty detection list. **Load Project** validates the project file, verifies that its video still exists, reopens that video, restores all saved detections, and starts with a clean state. Project files use this versioned format:
 
 ```json
 {
@@ -579,15 +579,16 @@ Opening a video directly initializes an empty detection list. **Load Project** v
 }
 ```
 
-When **Open Video**, **Load Project**, or **Projects** is selected with dirty metadata, a native prompt offers **Save**, **Discard**, and **Cancel**. Save must complete before navigation continues; cancelling or failing that save keeps the current video and edits. Discard proceeds without writing, Cancel changes nothing, and clean state bypasses the prompt. If a file picker is cancelled after choosing Discard, the current dirty state remains intact because navigation did not complete.
+When **Import Video**, **Load Project**, or **Projects** is selected with dirty metadata, a native prompt offers **Save**, **Discard**, and **Cancel**. Save must complete before navigation continues; cancelling or failing that save keeps the current video and edits. Discard proceeds without writing, Cancel changes nothing, and clean state bypasses the prompt. If a file picker is cancelled after choosing Discard, the current dirty state remains intact because navigation did not complete.
 
-The isolated preload API exposes `saveProject({ project, filePath, projectDirectory })`, `loadProject()`, and `confirmUnsavedChanges(videoName, destination)`. `filePath` is null for the first save and is reused for silent overwrite; a successful load returns `{ project, filePath, videoUrl }`. The prompt destination is `video`, `project`, or `projects` so the native message identifies the pending navigation.
+The isolated preload API exposes project-location, project-creation, video-import, save/load, and unsaved-change methods without giving the renderer direct filesystem access. `filePath` is null for the first save and is reused for silent overwrite; a successful load returns `{ project, filePath, videoUrl }`. The prompt destination is `video`, `project`, or `projects` so the native message identifies the pending navigation.
 
 ## Project Layout
 
 - `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
 - `clip-export.js` - validated filename construction, ffmpeg argument construction, atomic clip publication, and collision handling
 - `analysis-lifecycle.js` - protocol validation, staged error formatting, work-directory cleanup, and process-tree termination
+- `project-workspace.js` - project-name validation, workspace paths, and collision-safe video imports
 - `config.json` - Python, analysis-script, ffmpeg, timeout, and offline-stub selection
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup

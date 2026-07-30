@@ -4,7 +4,15 @@
 const viewLanding = document.getElementById('view-landing');
 const projectGrid = document.getElementById('project-grid');
 const projectEmpty = document.getElementById('project-empty');
+const projectsRootPath = document.getElementById('projects-root-path');
+const btnChangeProjectRoot = document.getElementById('btn-change-project-root');
 const btnNewProject = document.getElementById('btn-new-project');
+const createProjectDialog = document.getElementById('create-project-dialog');
+const createProjectForm = document.getElementById('create-project-form');
+const projectNameInput = document.getElementById('project-name-input');
+const projectNameError = document.getElementById('project-name-error');
+const btnCreateProjectCancel = document.getElementById('btn-create-project-cancel');
+const btnCreateProjectConfirm = document.getElementById('btn-create-project-confirm');
 const themeButtons = [...document.querySelectorAll('[data-theme-toggle]')];
 
 const THEME_STORAGE_KEY = 'apexiel-theme';
@@ -302,6 +310,33 @@ const STAGE_LABELS = {
 
 // --- Landing: project picker ---
 
+function validateProjectNameInput(value) {
+  const name = value.trim();
+  if (!name) return 'Enter a project name.';
+  if (name === '.' || name === '..') return 'Choose a different project name.';
+  if (name.length > 100) return 'Project names must be 100 characters or fewer.';
+  if (/[<>:"/\\|?*\x00-\x1f]/.test(name)) {
+    return 'Project names cannot contain < > : " / \\ | ? *.';
+  }
+  if (/[. ]$/.test(name)) return 'Project names cannot end with a period or space.';
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name)) {
+    return 'That name is reserved by Windows.';
+  }
+  return null;
+}
+
+function showProjectNameError(message) {
+  projectNameError.textContent = message || '';
+  projectNameError.hidden = !message;
+  projectNameInput.setAttribute('aria-invalid', String(Boolean(message)));
+}
+
+async function refreshProjectsRoot() {
+  const projectsRoot = await window.editorAPI.getProjectsRoot();
+  projectsRootPath.textContent = projectsRoot;
+  projectsRootPath.title = projectsRoot;
+}
+
 async function refreshProjectGrid() {
   projectGrid.querySelectorAll('.project-tile-wrap').forEach((wrap) => wrap.remove());
   const projects = await window.editorAPI.listProjects();
@@ -371,7 +406,7 @@ function exitToLanding() {
   videoName.textContent = 'No Video Selected';
   videoPlayer.removeAttribute('src');
   videoPlayer.load();
-  videoPlaceholder.textContent = 'Open a video to begin';
+  videoPlaceholder.textContent = 'Import a video to begin';
   videoPlaceholder.hidden = false;
   DetectionState.initialize([], 0);
   setSelection(null);
@@ -387,9 +422,51 @@ function exitToLanding() {
   refreshProjectGrid();
 }
 
-btnNewProject.addEventListener('click', async () => {
-  const project = await window.editorAPI.createProject();
-  if (project) enterEditor(project);
+btnNewProject.addEventListener('click', () => {
+  projectNameInput.value = '';
+  showProjectNameError(null);
+  createProjectDialog.showModal();
+  projectNameInput.focus();
+});
+
+btnCreateProjectCancel.addEventListener('click', () => createProjectDialog.close());
+
+createProjectForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const validationError = validateProjectNameInput(projectNameInput.value);
+  showProjectNameError(validationError);
+  if (validationError) {
+    projectNameInput.focus();
+    return;
+  }
+
+  btnCreateProjectConfirm.disabled = true;
+  btnCreateProjectCancel.disabled = true;
+  try {
+    const project = await window.editorAPI.createProject(projectNameInput.value.trim());
+    if (!project) return;
+    createProjectDialog.close();
+    await refreshProjectGrid();
+    enterEditor(project);
+  } catch {
+    showProjectNameError('Could not create the project.');
+  } finally {
+    btnCreateProjectConfirm.disabled = false;
+    btnCreateProjectCancel.disabled = false;
+  }
+});
+
+btnChangeProjectRoot.addEventListener('click', async () => {
+  btnChangeProjectRoot.disabled = true;
+  try {
+    const projectsRoot = await window.editorAPI.chooseProjectsRoot();
+    if (projectsRoot) {
+      projectsRootPath.textContent = projectsRoot;
+      projectsRootPath.title = projectsRoot;
+    }
+  } finally {
+    btnChangeProjectRoot.disabled = false;
+  }
 });
 
 btnBackToProjects.addEventListener('click', async () => {
@@ -402,6 +479,7 @@ btnBackToProjects.addEventListener('click', async () => {
   }
 });
 
+refreshProjectsRoot();
 refreshProjectGrid();
 
 // --- Editor ---
@@ -442,12 +520,36 @@ videoPlayer.addEventListener('loadedmetadata', () => {
 window.addEventListener('resize', () => Timeline.handleResize());
 
 btnOpenVideo.addEventListener('click', async () => {
-  if (analysisRunning || exportRunning || navigationInProgress) return;
+  if (analysisRunning || exportRunning || navigationInProgress || !currentProject) return;
   setNavigationInProgress(true);
   try {
     if (!await resolveUnsavedChanges('video')) return;
-    const result = await window.editorAPI.openVideo();
-    if (result) showVideo(result);
+
+    const previousStatus = {
+      hidden: statusLine.hidden,
+      stage: statusStage.textContent,
+      elapsed: statusElapsed.textContent,
+      tokens: statusTokens.textContent,
+    };
+    statusStage.textContent = 'Importing video into project...';
+    statusElapsed.textContent = '';
+    statusTokens.textContent = '';
+    statusLine.hidden = false;
+
+    const result = await window.editorAPI.openVideo(currentProject.path);
+    if (!result) {
+      statusLine.hidden = previousStatus.hidden;
+      statusStage.textContent = previousStatus.stage;
+      statusElapsed.textContent = previousStatus.elapsed;
+      statusTokens.textContent = previousStatus.tokens;
+      return;
+    }
+
+    showVideo(result);
+    statusStage.textContent = `Imported ${result.name}`;
+    statusElapsed.textContent = '';
+    statusTokens.textContent = '';
+    statusLine.hidden = false;
   } finally {
     setNavigationInProgress(false);
   }

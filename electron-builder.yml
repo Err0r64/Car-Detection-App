@@ -1,0 +1,36 @@
+appId: com.apexiel.capstonevideoeditor
+productName: Capstone Video Editor
+asar: true
+
+directories:
+  output: dist
+
+files:
+  - main.js
+  - preload.js
+  - analysis-lifecycle.js
+  - clip-export.js
+  - runtime-config.js
+  - runtime-paths.js
+  - project-workspace.js
+  - renderer/**/*
+  - package.json
+
+extraResources:
+  - from: config.json
+    to: config.json
+  - from: detections.schema.json
+    to: detections.schema.json
+  - from: pipeline
+    to: pipeline
+    filter:
+      - "**/*.py"
+      - requirements.txt
+      - "!tests/**/*"
+  - from: stub
+    to: stub
+    filter:
+      - "**/*.py"
+
+win:
+  executableName: Capstone Video Editor

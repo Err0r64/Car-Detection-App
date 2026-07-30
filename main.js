@@ -19,6 +19,13 @@ const {
   runtimeRoot,
 } = require('./runtime-paths');
 const { parseConfigJson } = require('./runtime-config');
+const {
+  cleanProjectName,
+  importVideoFile,
+  pathsEqual,
+  resolveProjectDirectory,
+  validateProjectName,
+} = require('./project-workspace');
 
 const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
@@ -89,29 +96,119 @@ function writeRegistry(projects) {
   fs.writeFileSync(registryPath(), JSON.stringify(projects, null, 2));
 }
 
+function settingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function readSettings() {
+  try {
+    const settings = parseConfigJson(fs.readFileSync(settingsPath(), 'utf8'));
+    return settings && typeof settings === 'object' && !Array.isArray(settings)
+      ? settings
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeSettings(settings) {
+  fs.writeFileSync(settingsPath(), JSON.stringify(settings, null, 2));
+}
+
+function defaultProjectsRoot() {
+  return path.join(app.getPath('documents'), 'Apexiel Projects');
+}
+
+function getProjectsRoot() {
+  const configured = readSettings().projectsRoot;
+  return typeof configured === 'string' && path.isAbsolute(configured)
+    ? path.resolve(configured)
+    : defaultProjectsRoot();
+}
+
+function findRegisteredProject(projectPath) {
+  if (typeof projectPath !== 'string' || !path.isAbsolute(projectPath)) return null;
+  return readRegistry().find((project) => pathsEqual(project.path, projectPath)) || null;
+}
+
 // --- IPC handlers ---
 
 ipcMain.handle('list-projects', () => readRegistry());
+ipcMain.handle('get-projects-root', () => getProjectsRoot());
 
-ipcMain.handle('create-project', async (event) => {
+ipcMain.handle('choose-projects-root', async (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
+  const currentRoot = getProjectsRoot();
   const result = await dialog.showOpenDialog(win, {
-    title: 'Select Project Directory',
+    title: 'Choose Projects Location',
+    defaultPath: fs.existsSync(currentRoot) ? currentRoot : path.dirname(currentRoot),
     properties: ['openDirectory', 'createDirectory'],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
 
-  const dir = result.filePaths[0];
-  const projects = readRegistry();
-  const existing = projects.find((p) => p.path === dir);
-  if (existing) return existing;
-
-  const project = { name: path.basename(dir), path: dir };
-  projects.push(project);
-  writeRegistry(projects);
-  return project;
+  const projectsRoot = path.resolve(result.filePaths[0]);
+  try {
+    fs.mkdirSync(projectsRoot, { recursive: true });
+    writeSettings({ ...readSettings(), projectsRoot });
+    return projectsRoot;
+  } catch (err) {
+    dialog.showErrorBox('Project location unavailable', `Could not use that folder:\n${err.message}`);
+    return null;
+  }
 });
 
+ipcMain.handle('create-project', async (event, requestedName) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const validationError = validateProjectName(requestedName);
+  if (validationError) {
+    dialog.showErrorBox('Invalid project name', validationError);
+    return null;
+  }
+
+  const name = cleanProjectName(requestedName);
+  const projectsRoot = getProjectsRoot();
+  let projectDirectory;
+  try {
+    projectDirectory = resolveProjectDirectory(projectsRoot, name);
+  } catch (err) {
+    dialog.showErrorBox('Could not create project', err.message);
+    return null;
+  }
+
+  const projects = readRegistry();
+  const registered = projects.find((project) => pathsEqual(project.path, projectDirectory));
+  if (registered) return registered;
+
+  try {
+    fs.mkdirSync(projectsRoot, { recursive: true });
+    if (fs.existsSync(projectDirectory)) {
+      if (!fs.statSync(projectDirectory).isDirectory()) {
+        throw new Error('A file with that project name already exists.');
+      }
+      const { response } = await dialog.showMessageBox(win, {
+        type: 'question',
+        title: 'Use Existing Folder',
+        message: `A folder named "${name}" already exists. Use it as this project?`,
+        detail: 'Existing files in the folder will not be changed.',
+        buttons: ['Use Folder', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+      });
+      if (response !== 0) return null;
+    } else {
+      fs.mkdirSync(projectDirectory);
+    }
+
+    fs.mkdirSync(path.join(projectDirectory, 'media'), { recursive: true });
+    const project = { name, path: projectDirectory };
+    projects.push(project);
+    writeRegistry(projects);
+    return project;
+  } catch (err) {
+    dialog.showErrorBox('Could not create project', err.message);
+    return null;
+  }
+});
 ipcMain.handle('delete-project', async (event, projectPath) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const projects = readRegistry();
@@ -122,7 +219,7 @@ ipcMain.handle('delete-project', async (event, projectPath) => {
     type: 'warning',
     title: 'Remove Project',
     message: `Remove "${project.name}" from the project list?`,
-    detail: 'This only removes the project from the list on the landing screen. The folder and its files stay on disk, and you can re-add it later via New Project.',
+    detail: 'This only removes the project from the landing screen. The project folder, imported videos, and saved files stay on disk.',
     buttons: ['Remove', 'Cancel'],
     defaultId: 1,
     cancelId: 1,
@@ -133,21 +230,34 @@ ipcMain.handle('delete-project', async (event, projectPath) => {
   return true;
 });
 
-ipcMain.handle('open-video', async (event) => {
+ipcMain.handle('open-video', async (event, projectPath) => {
   const win = BrowserWindow.fromWebContents(event.sender);
+  const project = findRegisteredProject(projectPath);
+  if (!project) {
+    dialog.showErrorBox('Import unavailable', 'Select a registered project before importing video.');
+    return null;
+  }
+
   const result = await dialog.showOpenDialog(win, {
-    title: 'Open Video',
+    title: 'Import Video',
     properties: ['openFile'],
     filters: [{ name: 'Videos', extensions: ['mp4', 'mov'] }],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
 
-  const filePath = result.filePaths[0];
-  // url: file:// form usable as a <video> src. Built here because neither the
-  // renderer nor the sandboxed preload has access to pathToFileURL.
-  return { path: filePath, name: path.basename(filePath), url: pathToFileURL(filePath).href };
+  const sourcePath = result.filePaths[0];
+  try {
+    const importedPath = await importVideoFile(project.path, sourcePath);
+    return {
+      path: importedPath,
+      name: path.basename(importedPath),
+      url: pathToFileURL(importedPath).href,
+    };
+  } catch (err) {
+    dialog.showErrorBox('Video import failed', `Could not copy the video into the project:\n${err.message}`);
+    return null;
+  }
 });
-
 ipcMain.handle('confirm-unsaved-changes', async (event, videoName, destination) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const displayName = typeof videoName === 'string' && videoName

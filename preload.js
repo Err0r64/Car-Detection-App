@@ -4,11 +4,13 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('editorAPI', {
   // Project picker (landing screen)
   listProjects: () => ipcRenderer.invoke('list-projects'),
-  createProject: () => ipcRenderer.invoke('create-project'),
+  getProjectsRoot: () => ipcRenderer.invoke('get-projects-root'),
+  chooseProjectsRoot: () => ipcRenderer.invoke('choose-projects-root'),
+  createProject: (projectName) => ipcRenderer.invoke('create-project', projectName),
   deleteProject: (projectPath) => ipcRenderer.invoke('delete-project', projectPath),
 
   // Editor
-  openVideo: () => ipcRenderer.invoke('open-video'),
+  openVideo: (projectPath) => ipcRenderer.invoke('open-video', projectPath),
   confirmUnsavedChanges: (videoName, destination) =>
     ipcRenderer.invoke('confirm-unsaved-changes', videoName, destination),
   startAnalysis: (videoPath) => ipcRenderer.invoke('start-analysis', videoPath),

@@ -45,6 +45,11 @@
             <span aria-hidden="true">+</span>
           </button>
         </div>
+        <div id="project-location">
+          <span class="project-location-label">Project location</span>
+          <span id="projects-root-path"></span>
+          <button id="btn-change-project-root" type="button">Change</button>
+        </div>
         <div id="project-grid">
           <!-- existing project tiles injected by app.js -->
         </div>
@@ -52,6 +57,19 @@
       </section>
     </div>
   </section>
+
+  <dialog id="create-project-dialog" aria-labelledby="create-project-title">
+    <form id="create-project-form">
+      <h2 id="create-project-title">New Project</h2>
+      <label for="project-name-input">Project name</label>
+      <input id="project-name-input" type="text" maxlength="100" autocomplete="off" />
+      <div id="project-name-error" role="alert" hidden></div>
+      <div class="create-project-actions">
+        <button id="btn-create-project-cancel" type="button" class="dialog-button dialog-button-secondary">Cancel</button>
+        <button id="btn-create-project-confirm" type="submit" class="dialog-button dialog-button-primary">Create</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- Editor -->
   <section id="view-editor" hidden>
@@ -71,7 +89,7 @@
 
     <div id="layout">
       <nav id="button-column">
-        <button id="btn-open-video">Open Video</button>
+        <button id="btn-open-video">Import Video</button>
         <button id="btn-detect-vehicles" disabled>Detect Vehicles</button>
         <button id="btn-save-changes" disabled>Save Changes</button>
         <button id="btn-export" disabled>Export</button>
@@ -88,7 +106,7 @@
       <main id="main-area">
         <div id="video-container">
           <video id="video-player" controls></video>
-          <div id="video-placeholder">Open a video to begin</div>
+          <div id="video-placeholder">Import a video to begin</div>
         </div>
         <div id="timeline" hidden>
           <div id="timeline-ruler"></div>

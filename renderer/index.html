@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; media-src 'self' file:; connect-src 'self' file:" />
@@ -10,11 +10,46 @@
   <!-- Landing: project picker -->
   <section id="view-landing">
     <div id="landing-card">
-      <h1 id="landing-logo">Apexiel</h1>
-      <div id="project-grid">
-        <button class="project-tile" id="btn-new-project">New Project</button>
-        <!-- existing project tiles injected by app.js -->
-      </div>
+      <header id="landing-header">
+        <h1 id="landing-logo">
+          <span class="landing-logo-lockup">
+            <img class="landing-logo-image logo-light" src="assets/apexiel-logo.png" alt="Apexiel" />
+            <img class="landing-logo-image logo-dark-base" src="assets/apexiel-logo.png" alt="" aria-hidden="true" />
+            <span class="logo-dark-accent-crop" aria-hidden="true">
+              <img class="landing-logo-image logo-dark-accent" src="assets/apexiel-logo.png" alt="" />
+            </span>
+          </span>
+        </h1>
+        <button
+          type="button"
+          class="icon-button theme-toggle"
+          data-theme-toggle
+          aria-label="Switch to light mode"
+          title="Switch to light mode"
+        >
+          <span class="theme-icon theme-icon-light" aria-hidden="true">&#9728;</span>
+          <span class="theme-icon theme-icon-dark" aria-hidden="true">&#9790;</span>
+        </button>
+      </header>
+
+      <section id="project-section" aria-labelledby="project-section-title">
+        <div id="project-section-header">
+          <h2 id="project-section-title">Projects</h2>
+          <button
+            type="button"
+            class="icon-button add-project"
+            id="btn-new-project"
+            aria-label="New project"
+            title="New project"
+          >
+            <span aria-hidden="true">+</span>
+          </button>
+        </div>
+        <div id="project-grid">
+          <!-- existing project tiles injected by app.js -->
+        </div>
+        <div id="project-empty" hidden>No projects yet</div>
+      </section>
     </div>
   </section>
 
@@ -22,6 +57,16 @@
   <section id="view-editor" hidden>
     <header id="status-header">
       <span id="video-name">No Video Selected</span>
+      <button
+        type="button"
+        class="icon-button theme-toggle"
+        data-theme-toggle
+        aria-label="Switch to light mode"
+        title="Switch to light mode"
+      >
+        <span class="theme-icon theme-icon-light" aria-hidden="true">&#9728;</span>
+        <span class="theme-icon theme-icon-dark" aria-hidden="true">&#9790;</span>
+      </button>
     </header>
 
     <div id="layout">

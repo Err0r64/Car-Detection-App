@@ -3,7 +3,50 @@
 // Landing view
 const viewLanding = document.getElementById('view-landing');
 const projectGrid = document.getElementById('project-grid');
+const projectEmpty = document.getElementById('project-empty');
 const btnNewProject = document.getElementById('btn-new-project');
+const themeButtons = [...document.querySelectorAll('[data-theme-toggle]')];
+
+const THEME_STORAGE_KEY = 'apexiel-theme';
+
+function readInitialTheme() {
+  try {
+    const storedTheme = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === 'light' || storedTheme === 'dark') return storedTheme;
+  } catch {
+    // The system preference remains a safe fallback if storage is unavailable.
+  }
+
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
+function applyTheme(theme, persist = true) {
+  const activeTheme = theme === 'light' ? 'light' : 'dark';
+  const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = activeTheme;
+
+  themeButtons.forEach((button) => {
+    const label = `Switch to ${nextTheme} mode`;
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    button.setAttribute('aria-pressed', String(activeTheme === 'light'));
+  });
+
+  if (!persist) return;
+  try {
+    window.localStorage.setItem(THEME_STORAGE_KEY, activeTheme);
+  } catch {
+    // Theme switching still works for the current session without persistence.
+  }
+}
+
+themeButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    const nextTheme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    applyTheme(nextTheme);
+  });
+});
+applyTheme(readInitialTheme(), false);
 
 // Editor view
 const viewEditor = document.getElementById('view-editor');
@@ -262,20 +305,39 @@ const STAGE_LABELS = {
 async function refreshProjectGrid() {
   projectGrid.querySelectorAll('.project-tile-wrap').forEach((wrap) => wrap.remove());
   const projects = await window.editorAPI.listProjects();
+  projectEmpty.hidden = projects.length > 0;
+
   for (const project of projects) {
     const wrap = document.createElement('div');
     wrap.className = 'project-tile-wrap';
 
     const tile = document.createElement('button');
     tile.className = 'project-tile';
-    tile.textContent = project.name;
     tile.title = project.path;
+    tile.setAttribute('aria-label', `Open ${project.name}`);
     tile.addEventListener('click', () => enterEditor(project));
+
+    const folderIcon = document.createElement('span');
+    folderIcon.className = 'project-folder-icon';
+    folderIcon.setAttribute('aria-hidden', 'true');
+
+    const name = document.createElement('span');
+    name.className = 'project-name';
+    name.textContent = project.name;
+
+    const projectPath = document.createElement('span');
+    projectPath.className = 'project-path';
+    projectPath.textContent = project.path;
+
+    tile.appendChild(folderIcon);
+    tile.appendChild(name);
+    tile.appendChild(projectPath);
 
     const del = document.createElement('button');
     del.className = 'project-delete';
-    del.textContent = '✕';
+    del.textContent = '\u00d7';
     del.title = 'Remove from project list';
+    del.setAttribute('aria-label', `Remove ${project.name} from project list`);
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
       const removed = await window.editorAPI.deleteProject(project.path);

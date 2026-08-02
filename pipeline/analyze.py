@@ -8,12 +8,14 @@ Stdout is reserved exclusively for the JSONL progress protocol.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from fractions import Fraction
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import signal
-import statistics
 import subprocess
 import sys
 from typing import Any
@@ -21,12 +23,12 @@ from typing import Any
 from stages import AnalysisStageError, run_post_proxy
 
 
-PROXY_CRF = 23
-MAX_PROXY_HEIGHT = 720
+PROXY_CRF = 21
+PROXY_FPS = 2.0
+MAX_PROXY_HEIGHT = 1080
 MAX_DURATION_DELTA_S = 0.5
-CADENCE_RELATIVE_TOLERANCE = 0.02
-CADENCE_ABSOLUTE_TOLERANCE_S = 0.0005
-MAX_CADENCE_OUTLIER_RATIO = 0.005
+PROXY_CACHE_VERSION = 2
+HARDWARE_PROXY_QUALITY = 21
 
 _active_process: subprocess.Popen[str] | None = None
 _termination_requested = False
@@ -41,6 +43,69 @@ class PipelineError(RuntimeError):
         self.message = message
 
 
+@dataclass(frozen=True)
+class ProxyEncoder:
+    name: str
+    arguments: tuple[str, ...]
+    hardware: bool = False
+
+
+SOFTWARE_ENCODER = ProxyEncoder(
+    "libx264",
+    ("-c:v", "libx264", "-preset", "veryfast", "-crf", str(PROXY_CRF)),
+)
+HARDWARE_ENCODERS = (
+    ProxyEncoder(
+        "h264_nvenc",
+        (
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p4",
+            "-tune",
+            "hq",
+            "-rc",
+            "vbr",
+            "-cq",
+            str(HARDWARE_PROXY_QUALITY),
+            "-b:v",
+            "0",
+        ),
+        True,
+    ),
+    ProxyEncoder(
+        "h264_qsv",
+        (
+            "-c:v",
+            "h264_qsv",
+            "-preset",
+            "veryfast",
+            "-global_quality",
+            str(HARDWARE_PROXY_QUALITY),
+        ),
+        True,
+    ),
+    ProxyEncoder(
+        "h264_amf",
+        (
+            "-c:v",
+            "h264_amf",
+            "-quality",
+            "speed",
+            "-rc",
+            "cqp",
+            "-qp_i",
+            str(HARDWARE_PROXY_QUALITY),
+            "-qp_p",
+            str(HARDWARE_PROXY_QUALITY),
+            "-qp_b",
+            str(HARDWARE_PROXY_QUALITY),
+        ),
+        True,
+    ),
+)
+
+
 def emit(stage: str, event: str, **payload: Any) -> None:
     """Write one compact protocol object and flush it immediately."""
     message = {"stage": stage, "event": event, **payload}
@@ -50,13 +115,6 @@ def emit(stage: str, event: str, **payload: Any) -> None:
 
 def diagnostic(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
-
-
-def remove_partial_proxy(proxy_path: Path) -> None:
-    try:
-        proxy_path.unlink(missing_ok=True)
-    except OSError as error:
-        diagnostic(f"proxy: Could not remove partial proxy {proxy_path}: {error}")
 
 
 def run_probe(ffprobe_path: str, media_path: Path, *arguments: str) -> dict[str, Any]:
@@ -104,58 +162,35 @@ def probe_duration(ffprobe_path: str, media_path: Path) -> float:
     return duration
 
 
-def probe_frame_timestamps(ffprobe_path: str, media_path: Path) -> list[float]:
-    probe = run_probe(
-        ffprobe_path,
-        media_path,
-        "-show_frames",
-        "-show_entries",
-        "frame=best_effort_timestamp_time",
-    )
-    timestamps: list[float] = []
-    for frame in probe.get("frames", []):
-        try:
-            timestamp = float(frame["best_effort_timestamp_time"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if math.isfinite(timestamp):
-            timestamps.append(timestamp)
-    if len(timestamps) < 2:
-        raise PipelineError("proxy", f"Not enough video frames found in {media_path.name}")
-    return timestamps
+def _parse_frame_rate(value: object) -> float | None:
+    if not isinstance(value, str) or not value or value == "0/0":
+        return None
+    try:
+        rate = float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        return None
+    return rate if math.isfinite(rate) and rate > 0 else None
 
 
-def verify_constant_frame_rate(
+def probe_frame_rate(
     ffprobe_path: str,
     media_path: Path,
     expected_fps: float | None = None,
 ) -> float:
-    timestamps = probe_frame_timestamps(ffprobe_path, media_path)
-    deltas = [
-        current - previous
-        for previous, current in zip(timestamps, timestamps[1:])
-        if current > previous
-    ]
-    if not deltas:
-        raise PipelineError("proxy", f"Could not determine frame cadence for {media_path.name}")
-
-    median_delta = statistics.median(deltas)
-    tolerance = max(
-        CADENCE_ABSOLUTE_TOLERANCE_S,
-        median_delta * CADENCE_RELATIVE_TOLERANCE,
+    probe = run_probe(
+        ffprobe_path,
+        media_path,
+        "-show_entries",
+        "stream=avg_frame_rate,r_frame_rate",
     )
-    outliers = sum(abs(delta - median_delta) > tolerance for delta in deltas)
-    outlier_ratio = outliers / len(deltas)
-    if outlier_ratio > MAX_CADENCE_OUTLIER_RATIO:
-        raise PipelineError(
-            "proxy",
-            (
-                f"Variable frame rate detected in {media_path.name} "
-                f"({outlier_ratio:.1%} cadence outliers)"
-            ),
-        )
-
-    measured_fps = 1.0 / median_delta
+    streams = probe.get("streams", [])
+    stream = streams[0] if streams else {}
+    measured_fps = (
+        _parse_frame_rate(stream.get("avg_frame_rate"))
+        or _parse_frame_rate(stream.get("r_frame_rate"))
+    )
+    if measured_fps is None:
+        raise PipelineError("proxy", f"Could not determine frame cadence for {media_path.name}")
     if expected_fps is not None and not math.isclose(
         measured_fps,
         expected_fps,
@@ -170,6 +205,119 @@ def verify_constant_frame_rate(
             ),
         )
     return measured_fps
+
+
+def _encoder_is_available(ffmpeg_path: str, encoder: ProxyEncoder) -> bool:
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=64x64:r=1:d=0.1",
+        "-frames:v",
+        "1",
+        "-pix_fmt",
+        "yuv420p",
+        *encoder.arguments,
+        "-f",
+        "null",
+        os.devnull,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def select_proxy_encoder(ffmpeg_path: str) -> ProxyEncoder:
+    for encoder in HARDWARE_ENCODERS:
+        if _encoder_is_available(ffmpeg_path, encoder):
+            return encoder
+    return SOFTWARE_ENCODER
+
+
+def proxy_cache_path(source_path: Path, cache_directory: Path) -> Path:
+    source_stat = source_path.stat()
+    identity = json.dumps(
+        {
+            "version": PROXY_CACHE_VERSION,
+            "source": os.fspath(source_path.resolve()),
+            "size": source_stat.st_size,
+            "modifiedNs": source_stat.st_mtime_ns,
+            "fps": PROXY_FPS,
+            "height": MAX_PROXY_HEIGHT,
+            "crf": PROXY_CRF,
+            "hardwareQuality": HARDWARE_PROXY_QUALITY,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return cache_directory / f"{source_path.stem}.{digest}.proxy.mp4"
+
+
+def _proxy_result(
+    proxy_path: Path,
+    source_duration_s: float,
+    source_fps: float,
+    proxy_duration_s: float,
+    proxy_fps: float,
+    encoder_name: str,
+    *,
+    cached: bool,
+) -> dict[str, Any]:
+    duration_delta_s = abs(proxy_duration_s - source_duration_s)
+    if duration_delta_s > MAX_DURATION_DELTA_S:
+        raise PipelineError(
+            "proxy",
+            (
+                f"Proxy duration differs from the original by {duration_delta_s:.3f}s "
+                f"(maximum {MAX_DURATION_DELTA_S:.3f}s)"
+            ),
+        )
+    return {
+        "proxyPath": os.fspath(proxy_path.resolve()),
+        "proxyCached": cached,
+        "proxyEncoder": encoder_name,
+        "sourceDurationS": round(source_duration_s, 6),
+        "proxyDurationS": round(proxy_duration_s, 6),
+        "durationDeltaS": round(duration_delta_s, 6),
+        "sourceFps": round(source_fps, 6),
+        "proxyFps": round(proxy_fps, 6),
+    }
+
+
+def _validate_proxy(
+    ffprobe_path: str,
+    proxy_path: Path,
+    source_duration_s: float,
+    source_fps: float,
+    encoder_name: str,
+    *,
+    cached: bool,
+) -> dict[str, Any]:
+    proxy_duration_s = probe_duration(ffprobe_path, proxy_path)
+    proxy_fps = probe_frame_rate(ffprobe_path, proxy_path, PROXY_FPS)
+    return _proxy_result(
+        proxy_path,
+        source_duration_s,
+        source_fps,
+        proxy_duration_s,
+        proxy_fps,
+        encoder_name,
+        cached=cached,
+    )
 
 
 def parse_progress_time_us(progress: dict[str, str]) -> int | None:
@@ -189,13 +337,12 @@ def create_proxy(
     source_path: Path,
     proxy_path: Path,
     source_duration_s: float,
-    source_fps: float,
+    encoder: ProxyEncoder = SOFTWARE_ENCODER,
 ) -> None:
     global _active_process
 
-    scale_filter = (
-        f"scale=-2:min({MAX_PROXY_HEIGHT}\\,ih)"
-    )
+    scale_filter = f"fps={PROXY_FPS:g},scale=-2:min({MAX_PROXY_HEIGHT}\\,ih)"
+    hardware_input_arguments = ("-hwaccel", "auto") if encoder.hardware else ()
     command = [
         ffmpeg_path,
         "-hide_banner",
@@ -203,6 +350,7 @@ def create_proxy(
         "error",
         "-nostdin",
         "-y",
+        *hardware_input_arguments,
         "-i",
         os.fspath(source_path),
         "-map",
@@ -210,16 +358,9 @@ def create_proxy(
         "-an",
         "-vf",
         scale_filter,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        str(PROXY_CRF),
+        *encoder.arguments,
         "-pix_fmt",
         "yuv420p",
-        "-r",
-        f"{source_fps:.6f}",
         "-fps_mode",
         "cfr",
         "-movflags",
@@ -280,38 +421,69 @@ def proxy_stage(
     proxy_path: Path,
     ffmpeg_path: str,
     ffprobe_path: str,
+    *,
+    reuse_existing: bool = False,
 ) -> dict[str, Any]:
     emit("proxy", "start")
     source_duration_s = probe_duration(ffprobe_path, source_path)
-    source_fps = verify_constant_frame_rate(ffprobe_path, source_path)
-    create_proxy(
-        ffmpeg_path,
-        source_path,
-        proxy_path,
-        source_duration_s,
-        source_fps,
+    source_fps = probe_frame_rate(ffprobe_path, source_path)
+    proxy_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if reuse_existing and proxy_path.is_file():
+        try:
+            result = _validate_proxy(
+                ffprobe_path,
+                proxy_path,
+                source_duration_s,
+                source_fps,
+                "cache",
+                cached=True,
+            )
+            emit("proxy", "complete", progress=1.0, **result)
+            return result
+        except PipelineError:
+            proxy_path.unlink(missing_ok=True)
+
+    partial_path = proxy_path.with_name(
+        f".{proxy_path.stem}.{os.getpid()}.partial.mp4"
     )
+    partial_path.unlink(missing_ok=True)
+    encoder = select_proxy_encoder(ffmpeg_path)
+    try:
+        try:
+            create_proxy(
+                ffmpeg_path,
+                source_path,
+                partial_path,
+                source_duration_s,
+                encoder,
+            )
+        except PipelineError:
+            partial_path.unlink(missing_ok=True)
+            if not encoder.hardware or _termination_requested:
+                raise
+            encoder = SOFTWARE_ENCODER
+            create_proxy(
+                ffmpeg_path,
+                source_path,
+                partial_path,
+                source_duration_s,
+                encoder,
+            )
 
-    proxy_duration_s = probe_duration(ffprobe_path, proxy_path)
-    proxy_fps = verify_constant_frame_rate(ffprobe_path, proxy_path, source_fps)
-    duration_delta_s = abs(proxy_duration_s - source_duration_s)
-    if duration_delta_s > MAX_DURATION_DELTA_S:
-        raise PipelineError(
-            "proxy",
-            (
-                f"Proxy duration differs from the original by {duration_delta_s:.3f}s "
-                f"(maximum {MAX_DURATION_DELTA_S:.3f}s)"
-            ),
+        result = _validate_proxy(
+            ffprobe_path,
+            partial_path,
+            source_duration_s,
+            source_fps,
+            encoder.name,
+            cached=False,
         )
+        partial_path.replace(proxy_path)
+        result["proxyPath"] = os.fspath(proxy_path.resolve())
+    finally:
+        partial_path.unlink(missing_ok=True)
 
-    result = {
-        "proxyPath": os.fspath(proxy_path.resolve()),
-        "sourceDurationS": round(source_duration_s, 6),
-        "proxyDurationS": round(proxy_duration_s, 6),
-        "durationDeltaS": round(duration_delta_s, 6),
-        "sourceFps": round(source_fps, 6),
-        "proxyFps": round(proxy_fps, 6),
-    }
     emit("proxy", "complete", progress=1.0, **result)
     return result
 
@@ -331,6 +503,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ffmpeg-path", default="ffmpeg", help="ffmpeg executable")
     parser.add_argument("--ffprobe-path", default="ffprobe", help="ffprobe executable")
     parser.add_argument(
+        "--proxy-cache-dir",
+        type=Path,
+        help="optional directory for source-keyed reusable proxies",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="exercise every stage with a canned Gemini response and no API request",
@@ -349,12 +526,27 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        proxy_path.unlink(missing_ok=True)
+        cache_directory = (
+            args.proxy_cache_dir.expanduser().resolve()
+            if args.proxy_cache_dir is not None
+            else None
+        )
+        if cache_directory is not None:
+            try:
+                cache_directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                cache_directory = None
+        proxy_path = (
+            proxy_cache_path(source_path, cache_directory)
+            if cache_directory is not None
+            else output_path.with_name(f"{output_path.stem}.proxy.mp4")
+        )
         proxy_result = proxy_stage(
             source_path,
             proxy_path,
             args.ffmpeg_path,
             args.ffprobe_path,
+            reuse_existing=cache_directory is not None,
         )
         run_post_proxy(
             proxy_path,
@@ -369,18 +561,15 @@ def main(argv: list[str] | None = None) -> int:
         emit(error.stage, "error", message=error.message)
         return 1
     except PipelineError as error:
-        remove_partial_proxy(proxy_path)
         diagnostic(f"{error.stage}: {error.message}")
         emit(error.stage, "error", message=error.message)
         return 1
     except OSError as error:
-        remove_partial_proxy(proxy_path)
         message = f"Could not prepare proxy output: {error}"
         diagnostic(f"proxy: {message}")
         emit("proxy", "error", message=message)
         return 1
     except KeyboardInterrupt:
-        remove_partial_proxy(proxy_path)
         diagnostic("proxy: Proxy generation was canceled")
         emit("proxy", "error", message="Proxy generation was canceled")
         return 130

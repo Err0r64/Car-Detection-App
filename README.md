@@ -11,6 +11,12 @@ The following optional work remains intentionally deferred:
 - Phase 3 CP5: timeline zoom and horizontal scrolling
 - Phase 5 CP5 polish: a staged analysis checklist with per-stage durations, activity heartbeat, and soft-stall warning
 
+## Cloud Prompt Service
+
+The Cloud Run prompt-control foundation is located in `cloud/prompt-service`. It provides immutable draft revisions, explicit publication, a public active-profile endpoint, Firestore persistence, and a Secret Manager-backed administrator token. This service is not connected to the desktop analysis path yet, so current Gemini behavior is unchanged.
+
+See `cloud/prompt-service/README.md` for local verification, Google Cloud deployment, security boundaries, token rotation, and Apexiel handoff steps.
+
 ## Prerequisites
 
 - Node.js LTS, including npm
@@ -353,9 +359,11 @@ python pipeline/analyze.py `
   --out "C:\path\to\results.json"
 ```
 
-The command writes `results.proxy.mp4`, uploads it through the Gemini Files API, waits for processing, submits one blocking Gemini 3.6 Flash request, stores the raw response under a sibling `raw` directory, preserves timestamps as fractional seconds, validates the final data against `detections.schema.json`, and atomically writes `results.json`. The proxy uses CRF 23, a maximum height of 720 pixels, and the source frame cadence. The pipeline rejects variable-frame-rate sources and source/proxy duration differences greater than 0.5 seconds.
+The command writes `results.proxy.mp4` by default, uploads it through the Gemini Files API, waits for processing, submits one blocking Gemini 3.6 Flash request, stores the raw response under a sibling `raw` directory, preserves timestamps as fractional seconds, validates the final data against `detections.schema.json`, and atomically writes `results.json`. Pass `--proxy-cache-dir <directory>` to reuse a source-keyed proxy across runs. Electron supplies `<project>/media/.analysis-cache`, and cache keys include the source path, size, modification time, and proxy settings.
 
-The request uses seed 0, 1 FPS Gemini sampling, medium media resolution, and an explicit JSON response schema. Sampling parameters such as temperature are omitted for Gemini 3.6 Flash. The duration-aware prompt in `pipeline/gemini_harness/prompts.py` uses the validated research response contract and tells the model not to extend appearances through absent footage, carry identities into later intervals, or create duplicate entries for one visible car. A fixed seed is best-effort reproducibility; Gemini can still interpret the same video differently across separate API calls.
+The balanced proxy profile is CFR H.264 at 2 FPS, CRF 21 for software encoding, and a maximum height of 1080 pixels. The pipeline probes NVIDIA NVENC, Intel Quick Sync, and AMD AMF in that order and uses each backend's quality-based rate control with a target quality of 21 instead of a fixed bitrate. It requests hardware-assisted decoding when a hardware encoder is selected, retries with `libx264` if that encoder fails, and uses stream metadata instead of enumerating every source and proxy frame. A source may be variable-frame-rate because the explicit FFmpeg FPS filter normalizes the proxy; source/proxy duration differences greater than 0.5 seconds are still rejected. Cache profile version 2 prevents older 5 FPS/720p proxies from being reused. Cache files are validated before reuse and incomplete proxy writes are never published. If the source folder does not permit cache creation, analysis falls back to the temporary run directory without caching.
+
+The Gemini request samples the 2 FPS proxy at the same 2 FPS cadence, uses seed 0, medium media resolution, and an explicit JSON response schema. This removes the previous mismatch where most encoded proxy frames were discarded before model analysis and gives fast-moving footage half-second sampling points. Sampling parameters such as temperature are omitted for Gemini 3.6 Flash. The duration-aware prompt in `pipeline/gemini_harness/prompts.py` uses the validated research response contract and tells the model not to extend appearances through absent footage, carry identities into later intervals, or create duplicate entries for one visible car. Physical vehicle identity has priority over timing and visual similarity, with an explicit example requiring two entries when different vehicles appear across a 15-second gap. A fixed seed is best-effort reproducibility; Gemini can still interpret the same video differently across separate API calls.
 
 Bounds are clamped to the source duration. Intervals that collapse to zero length only because they lie outside the source are omitted, while model-provided zero-length or reversed intervals remain parsing errors. MM:SS strings are accepted at the model boundary; when both bounds exceed the clip duration, a valid concatenated MMSS pair such as `115-137` is narrowly recovered as `75-97` before validation. Rich response fields map directly to the application: `is_target_vehicle` becomes `subject`, `vehicle_description` becomes `notes`, and `detection_confidence` is retained.
 
@@ -418,6 +426,44 @@ Get-ChildItem ".\cp2-manual\raw" -Filter '*.txt'
 
 The unique stages should be `analyzing`, `parsing`, `processing`, `proxy`, and `upload`; at least one token event should print; the final event should be `parsing/done` with the absolute results path. The invalid-bounds command should print no rows, schema validation should print `schema valid`, and the raw directory should contain the saved model response. Because only stdout is piped to `Tee-Object`, diagnostics remain on stderr and cannot contaminate the captured JSONL file.
 
+### Proxy optimization verification
+
+Use the dry-run path to verify proxy generation and cache reuse without a Gemini key, network request, or API charge:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "./cp2-manual" | Out-Null
+$video = "./cp2-manual/short-cfr-video.mp4"
+$cache = "./cp2-manual/proxy-cache"
+
+python pipeline/analyze.py `
+  --video $video `
+  --out "./cp2-manual/cache-first-results.json" `
+  --proxy-cache-dir $cache `
+  --dry-run |
+  Tee-Object -FilePath "./cp2-manual/cache-first.jsonl"
+if ($LASTEXITCODE -ne 0) { throw "First proxy run failed." }
+
+python pipeline/analyze.py `
+  --video $video `
+  --out "./cp2-manual/cache-second-results.json" `
+  --proxy-cache-dir $cache `
+  --dry-run |
+  Tee-Object -FilePath "./cp2-manual/cache-second.jsonl"
+if ($LASTEXITCODE -ne 0) { throw "Cached proxy run failed." }
+
+$first = Get-Content "./cp2-manual/cache-first.jsonl" |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.stage -eq "proxy" -and $_.event -eq "complete" }
+$second = Get-Content "./cp2-manual/cache-second.jsonl" |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object { $_.stage -eq "proxy" -and $_.event -eq "complete" }
+
+$first | Format-List proxyCached,proxyEncoder,sourceFps,proxyFps,durationDeltaS
+$second | Format-List proxyCached,proxyEncoder,sourceFps,proxyFps,durationDeltaS
+```
+
+The first event should report `proxyCached: False`, `proxyFps: 2`, and either an available hardware encoder or `libx264`. The second should report `proxyCached: True`, `proxyEncoder: cache`, and the same duration and frame rate. The second run should emit no `proxy/progress` events.
+
 ## Application Analysis Configuration
 
 `config.json` controls the main-process child command:
@@ -427,12 +473,15 @@ The unique stages should be `analyzing`, `parsing`, `processing`, `proxy`, and `
   "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
-  "analysisTimeoutSeconds": 900,
+  "analysisStallTimeoutSeconds": 300,
+  "analysisMaxTimeoutSeconds": 2700,
   "useDevStub": false
 }
 ```
 
-Relative `analyzeScript` paths resolve from the application root. `analysisTimeoutSeconds` defaults to and cannot exceed 900 seconds; lower positive values support timeout testing. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes result load/discard operations with no path argument, so the renderer can only consume the schema-validated result recorded for the active analysis run.
+Relative `analyzeScript` paths resolve from the application root. `analysisStallTimeoutSeconds` defaults to 300 seconds and resets whenever valid progress or diagnostic activity arrives. `analysisMaxTimeoutSeconds` defaults to 2700 seconds and remains an absolute ceiling; it must be greater than the stall timeout. The accepted upper limits are 1800 and 7200 seconds respectively. Existing configurations containing only `analysisTimeoutSeconds` remain compatible and use that value as the stall timeout. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes result load/discard operations with no path argument, so the renderer can only consume the schema-validated result recorded for the active analysis run.
+
+Before real analysis starts, Electron verifies that the selected Python can import `google.genai` and `jsonschema`. If a non-absolute `pythonPath` resolves to an incomplete virtual environment or older Python on Windows, the app checks interpreters reported by the Python launcher and `where.exe` and uses the first compatible installation. An explicitly configured absolute path is never overridden. If none qualify, the startup dialog lists the checked interpreter paths and an exact installation command. This preflight runs before proxy generation.
 
 ### CP3 application verification
 
@@ -466,7 +515,7 @@ $before = @(Get-ChildItem $env:TEMP -Directory -Filter 'capstone-analysis-*' -Er
 
 #### Cancel and cleanup
 
-Set `useDevStub` to `true` and `analysisTimeoutSeconds` to `900` in `config.json`, then run `npm start`. Open a video and select **Detect Vehicles**. Select **Cancel** once while the status reads **Uploading**, then repeat in a fresh run while it reads **Analyzing**. In both runs, the analysis controls must return to idle without an error dialog. Close Electron and run:
+Set `useDevStub` to `true`, `analysisStallTimeoutSeconds` to `300`, and `analysisMaxTimeoutSeconds` to `2700` in `config.json`, then run `npm start`. Open a video and select **Detect Vehicles**. Select **Cancel** once while the status reads **Uploading**, then repeat in a fresh run while it reads **Analyzing**. In both runs, the analysis controls must return to idle without an error dialog. Close Electron and run:
 
 ```powershell
 $after = @(Get-ChildItem $env:TEMP -Directory -Filter 'capstone-analysis-*' -ErrorAction SilentlyContinue).FullName
@@ -501,11 +550,11 @@ The dialog must identify the `processing` stage and report malformed JSONL progr
 
 #### Timeout
 
-Keep stub mode enabled, set `analysisTimeoutSeconds` to `3`, and run `npm start`. Start an analysis and do not cancel it. After three seconds, a visible error must identify the current stage and state that analysis timed out after 3 seconds. The controls must return to idle, with no surviving work directory or Python process. Restore `analysisTimeoutSeconds` to `900` afterward.
+Keep stub mode enabled, set `analysisStallTimeoutSeconds` to `3`, keep `analysisMaxTimeoutSeconds` at `2700`, and run `npm start`. Start an analysis and do not cancel it. After three seconds without a protocol event, a visible error must identify the current stage and state that analysis stopped reporting progress for 3 seconds. The controls must return to idle, with no surviving work directory or Python process. Restore `analysisStallTimeoutSeconds` to `300` afterward.
 
 #### Missing key and unreachable API
 
-Set `useDevStub` to `false` and keep `analysisTimeoutSeconds` at `900`. In a PowerShell session without the key, run:
+Set `useDevStub` to `false` and keep the stall and maximum timeouts at `300` and `2700`. In a PowerShell session without the key, run:
 
 ```powershell
 Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
@@ -587,9 +636,10 @@ The isolated preload API exposes project-location, project-creation, video-impor
 
 - `main.js` - Electron main process, native dialogs, project registry, child-process lifecycle, and IPC handlers
 - `clip-export.js` - validated filename construction, ffmpeg argument construction, atomic clip publication, and collision handling
-- `analysis-lifecycle.js` - protocol validation, staged error formatting, work-directory cleanup, and process-tree termination
+- `analysis-lifecycle.js` - protocol validation, progress-aware watchdogs, staged error formatting, work-directory cleanup, and process-tree termination
 - `project-workspace.js` - project-name validation, workspace paths, and collision-safe video imports
-- `config.json` - Python, analysis-script, ffmpeg, timeout, and offline-stub selection
+- `config.json` - Python, analysis-script, ffmpeg, stall/maximum timeouts, and offline-stub selection
+- `python-runtime.js` - Python discovery and pipeline dependency preflight
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup
 - `renderer/app.js` - renderer application state and view coordination
@@ -598,7 +648,7 @@ The isolated preload API exposes project-location, project-creation, video-impor
 - `renderer/export-scope.js` - all, subject-only, and selected-interval filtering over detection snapshots
 - `renderer/style.css` - application, timeline, and panel styles
 - `stub/fake_analysis.py` - simulated analysis pipeline
-- `pipeline/analyze.py` - standalone real-analysis entry point and CFR proxy stage
+- `pipeline/analyze.py` - standalone real-analysis entry point, optimized CFR proxy generation, and cache management
 - `pipeline/gemini_harness/` - minimally adapted Gemini harness API, prompt, and response parser
 - `pipeline/stages.py` - upload, processing, analysis, normalization, and schema validation
 - `detections.schema.json` - frozen real-analysis result contract

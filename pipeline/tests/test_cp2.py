@@ -11,7 +11,18 @@ from unittest.mock import patch
 PIPELINE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PIPELINE_DIR))
 
-from analyze import PROXY_CRF, create_proxy  # noqa: E402
+from analyze import (  # noqa: E402
+    HARDWARE_ENCODERS,
+    HARDWARE_PROXY_QUALITY,
+    MAX_PROXY_HEIGHT,
+    PROXY_CRF,
+    PROXY_FPS,
+    create_proxy,
+    probe_frame_rate,
+    proxy_cache_path,
+    proxy_stage,
+    select_proxy_encoder,
+)
 from gemini_harness import config as gemini_config  # noqa: E402
 from gemini_harness.client import GeminiClient  # noqa: E402
 from gemini_harness.prompts import render as render_prompt  # noqa: E402
@@ -56,6 +67,10 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertIn('"detection_confidence"', prompt)
         self.assertIn("The video content provided is 114.933 seconds long", prompt)
         self.assertIn("one minute ten seconds is 70", prompt)
+        self.assertIn("Each appearance object represents exactly ONE physical vehicle", prompt)
+        self.assertIn("Different physical vehicles ALWAYS require separate", prompt)
+        self.assertIn("This return rule applies only to the same physical vehicle", prompt)
+        self.assertIn("Never return\none appearance from 12 to 52", prompt)
         self.assertIn("Do not extend an appearance through footage", prompt)
         self.assertIn("Do not create overlapping duplicate entries", prompt)
 
@@ -126,6 +141,8 @@ class Cp2ParsingTests(unittest.TestCase):
 
         self.assertIsNotNone(fake_models.call)
         request_config = fake_models.call["config"]
+        video_part = fake_models.call["contents"][0]
+        self.assertEqual(video_part.video_metadata.fps, 2.0)
         self.assertEqual(request_config.seed, gemini_config.SEED)
         self.assertIsNone(request_config.temperature)
         self.assertEqual(request_config.http_options.retry_options.attempts, 1)
@@ -241,7 +258,7 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertEqual(events[0][0], "rate_limit_wait")
         self.assertEqual(events[0][1]["requestsPerMinute"], 1)
 
-    def test_proxy_preserves_source_cadence_at_research_quality(self) -> None:
+    def test_proxy_uses_balanced_two_fps_1080p_profile(self) -> None:
         process = type(
             "Process",
             (),
@@ -257,13 +274,138 @@ class Cp2ParsingTests(unittest.TestCase):
                 Path("source.mov"),
                 Path("proxy.mp4"),
                 114.933,
-                23.976024,
             )
 
         command = popen.call_args.args[0]
+        video_filter = command[command.index("-vf") + 1]
+        self.assertIn(f"fps={PROXY_FPS:g}", video_filter)
+        self.assertIn(f"min({MAX_PROXY_HEIGHT}\\,ih)", video_filter)
         self.assertEqual(command[command.index("-crf") + 1], str(PROXY_CRF))
-        self.assertEqual(command[command.index("-r") + 1], "23.976024")
+        self.assertNotIn("-r", command)
         self.assertEqual(command[command.index("-fps_mode") + 1], "cfr")
+
+    def test_hardware_proxy_requests_accelerated_decode(self) -> None:
+        process = type(
+            "Process",
+            (),
+            {
+                "stdout": [],
+                "stderr": io.StringIO(""),
+                "wait": lambda self: 0,
+            },
+        )()
+        with patch("analyze.subprocess.Popen", return_value=process) as popen:
+            create_proxy(
+                "ffmpeg",
+                Path("source.mov"),
+                Path("proxy.mp4"),
+                114.933,
+                HARDWARE_ENCODERS[0],
+            )
+
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-hwaccel") + 1], "auto")
+
+    def test_hardware_encoders_use_quality_based_rate_control(self) -> None:
+        nvenc, qsv, amf = HARDWARE_ENCODERS
+
+        self.assertIn("-cq", nvenc.arguments)
+        self.assertEqual(
+            nvenc.arguments[nvenc.arguments.index("-cq") + 1],
+            str(HARDWARE_PROXY_QUALITY),
+        )
+        self.assertEqual(nvenc.arguments[nvenc.arguments.index("-b:v") + 1], "0")
+
+        self.assertIn("-global_quality", qsv.arguments)
+        self.assertEqual(
+            qsv.arguments[qsv.arguments.index("-global_quality") + 1],
+            str(HARDWARE_PROXY_QUALITY),
+        )
+        self.assertNotIn("-b:v", qsv.arguments)
+
+        self.assertEqual(amf.arguments[amf.arguments.index("-rc") + 1], "cqp")
+        for option in ("-qp_i", "-qp_p", "-qp_b"):
+            self.assertEqual(
+                amf.arguments[amf.arguments.index(option) + 1],
+                str(HARDWARE_PROXY_QUALITY),
+            )
+        self.assertNotIn("-b:v", amf.arguments)
+
+    def test_frame_rate_probe_uses_stream_metadata(self) -> None:
+        with patch(
+            "analyze.run_probe",
+            return_value={
+                "streams": [
+                    {"avg_frame_rate": "60000/1001", "r_frame_rate": "60/1"}
+                ]
+            },
+        ) as run_probe:
+            measured = probe_frame_rate("ffprobe", Path("source.mov"))
+
+        self.assertAlmostEqual(measured, 59.94005994)
+        arguments = run_probe.call_args.args
+        self.assertIn("stream=avg_frame_rate,r_frame_rate", arguments)
+        self.assertNotIn("-show_frames", arguments)
+
+    def test_proxy_cache_key_changes_with_the_source(self) -> None:
+        root = Path(__file__).with_name(".cp2-cache-key")
+        source = root / "source.mov"
+        cache = root / "cache"
+        root.mkdir(exist_ok=True)
+        try:
+            source.write_bytes(b"first")
+            first = proxy_cache_path(source, cache)
+            self.assertEqual(first, proxy_cache_path(source, cache))
+
+            source.write_bytes(b"second version")
+            second = proxy_cache_path(source, cache)
+        finally:
+            source.unlink(missing_ok=True)
+            root.rmdir()
+
+        self.assertNotEqual(first.name, second.name)
+        self.assertTrue(first.name.endswith(".proxy.mp4"))
+
+    def test_proxy_stage_reuses_a_valid_cached_proxy(self) -> None:
+        root = Path(__file__).with_name(".cp2-cache-reuse")
+        source = root / "source.mov"
+        cache = root / "cache"
+        cached_proxy = cache / "source.proxy.mp4"
+        cache.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"source")
+        cached_proxy.write_bytes(b"proxy")
+        try:
+            with (
+                patch("analyze.probe_duration", side_effect=[10.0, 10.0]),
+                patch("analyze.probe_frame_rate", side_effect=[60.0, PROXY_FPS]),
+                patch("analyze.create_proxy") as create,
+                patch("analyze.emit"),
+            ):
+                result = proxy_stage(
+                    source,
+                    cached_proxy,
+                    "ffmpeg",
+                    "ffprobe",
+                    reuse_existing=True,
+                )
+        finally:
+            cached_proxy.unlink(missing_ok=True)
+            source.unlink(missing_ok=True)
+            cache.rmdir()
+            root.rmdir()
+
+        create.assert_not_called()
+        self.assertTrue(result["proxyCached"])
+        self.assertEqual(result["proxyFps"], PROXY_FPS)
+
+    def test_hardware_encoder_selection_falls_through_candidates(self) -> None:
+        with patch(
+            "analyze._encoder_is_available",
+            side_effect=[False, True],
+        ):
+            selected = select_proxy_encoder("ffmpeg")
+
+        self.assertEqual(selected, HARDWARE_ENCODERS[1])
 
     def test_validated_array_maps_to_application_fields(self) -> None:
         results = _normalize(validated_response(), 90.0)

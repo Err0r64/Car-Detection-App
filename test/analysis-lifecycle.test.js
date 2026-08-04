@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const {
+  createAnalysisWatchdog,
   formatAnalysisFailure,
   removeRunDirectory,
   terminateProcessTree,
@@ -99,4 +100,60 @@ test('terminates a POSIX process group and escalates after the grace period', ()
   assert.deepEqual(signals, [[-654, 'SIGTERM']]);
   forceKill();
   assert.deepEqual(signals, [[-654, 'SIGTERM'], [-654, 'SIGKILL']]);
+});
+
+test('analysis watchdog resets its stall timer when progress arrives', () => {
+  const timers = [];
+  const cleared = [];
+  const events = [];
+  const setTimeoutFn = (callback, delay) => {
+    const timer = {
+      callback,
+      delay,
+      unrefCalled: false,
+      unref() {
+        this.unrefCalled = true;
+      },
+    };
+    timers.push(timer);
+    return timer;
+  };
+
+  const watchdog = createAnalysisWatchdog({
+    stallMs: 100,
+    maxMs: 500,
+    onStall: () => events.push('stall'),
+    onMax: () => events.push('max'),
+    setTimeoutFn,
+    clearTimeoutFn: (timer) => cleared.push(timer),
+  });
+
+  watchdog.start();
+  assert.equal(timers.length, 2);
+  assert.equal(timers[0].delay, 100);
+  assert.equal(timers[1].delay, 500);
+  assert.equal(timers.every((timer) => timer.unrefCalled), true);
+
+  watchdog.touch();
+  assert.equal(cleared.includes(timers[0]), true);
+  assert.equal(timers[2].delay, 100);
+
+  timers[2].callback();
+  assert.deepEqual(events, ['stall']);
+
+  watchdog.stop();
+  timers[1].callback();
+  assert.deepEqual(events, ['stall']);
+});
+
+test('analysis watchdog requires a larger maximum duration', () => {
+  assert.throws(
+    () => createAnalysisWatchdog({
+      stallMs: 100,
+      maxMs: 100,
+      onStall() {},
+      onMax() {},
+    }),
+    /greater than stallMs/
+  );
 });

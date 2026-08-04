@@ -53,6 +53,10 @@ def _run_gemini(
     emit: Emit,
     *,
     dry_run: bool,
+    prompt_instructions: str | None,
+    prompt_profile_id: str,
+    prompt_profile_version: int | None,
+    prompt_source: str,
 ) -> str:
     try:
         client = GeminiClient(
@@ -78,7 +82,13 @@ def _run_gemini(
             raise AnalysisStageError("processing", str(error)) from error
         emit("processing", "complete", progress=1.0)
 
-        emit("analyzing", "start")
+        emit(
+            "analyzing",
+            "start",
+            promptSource=prompt_source,
+            promptProfileId=prompt_profile_id,
+            promptProfileVersion=prompt_profile_version,
+        )
         config = RunConfig(
             model=gemini_config.MODEL,
             temperature=gemini_config.TEMPERATURE,
@@ -89,7 +99,7 @@ def _run_gemini(
         try:
             raw_text, meta = client.analyze(
                 uploaded,
-                render_prompt(duration_s),
+                render_prompt(duration_s, prompt_instructions),
                 config,
                 run_id,
             )
@@ -234,6 +244,10 @@ def run_post_proxy(
     emit: Emit,
     *,
     dry_run: bool,
+    prompt_instructions: str | None = None,
+    prompt_profile_id: str = "built-in",
+    prompt_profile_version: int | None = None,
+    prompt_source: str = "built-in",
 ) -> None:
     raw_text = _run_gemini(
         proxy_path,
@@ -241,6 +255,10 @@ def run_post_proxy(
         duration_s,
         emit,
         dry_run=dry_run,
+        prompt_instructions=prompt_instructions,
+        prompt_profile_id=prompt_profile_id,
+        prompt_profile_version=prompt_profile_version,
+        prompt_source=prompt_source,
     )
     emit("parsing", "start")
     results = _normalize(raw_text, duration_s)

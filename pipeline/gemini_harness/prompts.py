@@ -93,9 +93,27 @@ Duplicate time ranges are valid only for separately visible cars.
 - If no participating vehicles appear, return {{"appearances": []}}."""
 
 
-def render(duration_s: float) -> str:
-    """Render the validated prompt with an explicit media-duration guard."""
+PROMPT_CONTRACT_TEMPLATE = PROMPT_TEMPLATE[PROMPT_TEMPLATE.index("\nFor each appearance:"):]
+
+
+def render(duration_s: float, instructions: str | None = None) -> str:
+    """Compose domain instructions with the fixed response and timing contract."""
     if not math.isfinite(duration_s) or duration_s <= 0:
         raise ValueError("duration_s must be a positive finite number")
     duration = f"{duration_s:.3f}".rstrip("0").rstrip(".")
-    return PROMPT_TEMPLATE.format(schema=OUTPUT_SCHEMA, duration_s=duration)
+    if instructions is None:
+        return PROMPT_TEMPLATE.format(schema=OUTPUT_SCHEMA, duration_s=duration)
+    if not isinstance(instructions, str):
+        raise TypeError("instructions must be a string")
+    normalized = instructions.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        raise ValueError("instructions must not be empty")
+    if len(normalized) > 12_000:
+        raise ValueError("instructions must be no more than 12000 characters")
+    if "\x00" in normalized:
+        raise ValueError("instructions must not contain null characters")
+    contract = PROMPT_CONTRACT_TEMPLATE.format(
+        schema=OUTPUT_SCHEMA,
+        duration_s=duration,
+    )
+    return f"{normalized}{contract}"

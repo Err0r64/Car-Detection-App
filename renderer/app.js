@@ -870,10 +870,14 @@ function endAnalysisRun() {
 
 btnDetectVehicles.addEventListener('click', async () => {
   if (!currentVideo || analysisRunning || exportRunning) return;
-  const started = await window.editorAPI.startAnalysis(currentVideo.path);
-  if (!started) return;
-
   analysisRunning = true;
+  updateAppControls();
+  const started = await window.editorAPI.startAnalysis(currentVideo.path);
+  if (!started) {
+    endAnalysisRun();
+    return;
+  }
+
   analysisStart = Date.now();
   statusStage.textContent = 'Starting…';
   statusElapsed.textContent = '0.0s';

@@ -50,6 +50,14 @@ class ProxyEncoder:
     hardware: bool = False
 
 
+@dataclass(frozen=True)
+class PromptSelection:
+    instructions: str | None
+    source: str
+    profile_id: str = "built-in"
+    version: int | None = None
+
+
 SOFTWARE_ENCODER = ProxyEncoder(
     "libx264",
     ("-c:v", "libx264", "-preset", "veryfast", "-crf", str(PROXY_CRF)),
@@ -115,6 +123,56 @@ def emit(stage: str, event: str, **payload: Any) -> None:
 
 def diagnostic(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def load_prompt_selection(
+    profile_path: Path | None,
+    source: str,
+) -> PromptSelection:
+    if profile_path is None:
+        if source != "built-in":
+            raise PipelineError("proxy", "A remote or cached prompt profile file is required")
+        return PromptSelection(instructions=None, source="built-in")
+    if source not in {"remote", "cache"}:
+        raise PipelineError("proxy", "A prompt profile must use the remote or cache source")
+
+    resolved_path = profile_path.expanduser().resolve()
+    try:
+        if resolved_path.stat().st_size > 64 * 1024:
+            raise PipelineError("proxy", "Prompt profile file is too large")
+        envelope = json.loads(resolved_path.read_text(encoding="utf-8"))
+    except PipelineError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise PipelineError("proxy", f"Could not read prompt profile: {error}") from error
+
+    if not isinstance(envelope, dict) or envelope.get("schemaVersion") != 1:
+        raise PipelineError("proxy", "Prompt profile schemaVersion must be 1")
+    profile = envelope.get("profile")
+    if not isinstance(profile, dict):
+        raise PipelineError("proxy", "Prompt profile must contain a profile object")
+    profile_id = profile.get("profileId")
+    version = profile.get("version")
+    instructions = profile.get("instructions")
+    if (
+        not isinstance(profile_id, str)
+        or not 3 <= len(profile_id) <= 64
+        or not profile_id.isascii()
+    ):
+        raise PipelineError("proxy", "Prompt profileId is invalid")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise PipelineError("proxy", "Prompt profile version must be a positive integer")
+    if not isinstance(instructions, str):
+        raise PipelineError("proxy", "Prompt instructions must be a string")
+    normalized = instructions.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized or len(normalized) > 12_000 or "\x00" in normalized:
+        raise PipelineError("proxy", "Prompt instructions are invalid")
+    return PromptSelection(
+        instructions=normalized,
+        source=source,
+        profile_id=profile_id,
+        version=version,
+    )
 
 
 def run_probe(ffprobe_path: str, media_path: Path, *arguments: str) -> dict[str, Any]:
@@ -508,6 +566,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="optional directory for source-keyed reusable proxies",
     )
     parser.add_argument(
+        "--prompt-profile",
+        type=Path,
+        help="validated active prompt-profile JSON from the desktop client",
+    )
+    parser.add_argument(
+        "--prompt-source",
+        choices=("built-in", "remote", "cache"),
+        default="built-in",
+        help="origin of the selected prompt profile",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="exercise every stage with a canned Gemini response and no API request",
@@ -526,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_selection = load_prompt_selection(args.prompt_profile, args.prompt_source)
         cache_directory = (
             args.proxy_cache_dir.expanduser().resolve()
             if args.proxy_cache_dir is not None
@@ -554,6 +624,10 @@ def main(argv: list[str] | None = None) -> int:
             proxy_result["sourceDurationS"],
             emit,
             dry_run=args.dry_run,
+            prompt_instructions=prompt_selection.instructions,
+            prompt_profile_id=prompt_selection.profile_id,
+            prompt_profile_version=prompt_selection.version,
+            prompt_source=prompt_selection.source,
         )
         return 0
     except AnalysisStageError as error:

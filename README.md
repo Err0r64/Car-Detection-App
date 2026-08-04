@@ -13,7 +13,11 @@ The following optional work remains intentionally deferred:
 
 ## Cloud Prompt Service
 
-The Cloud Run prompt-control foundation is located in `cloud/prompt-service`. It provides immutable draft revisions, explicit publication, a public active-profile endpoint, Firestore persistence, and a Secret Manager-backed administrator token. This service is not connected to the desktop analysis path yet, so current Gemini behavior is unchanged.
+The Cloud Run prompt-control service is located in `cloud/prompt-service`. It
+provides immutable draft revisions, explicit publication, a public active-profile
+endpoint, Firestore persistence, and a Secret Manager-backed administrator token.
+Electron now retrieves the active domain instructions before analysis, caches the
+last valid revision, and passes the selected profile to the local Gemini pipeline.
 
 See `cloud/prompt-service/README.md` for local verification, Google Cloud deployment, security boundaries, token rotation, and Apexiel handoff steps.
 
@@ -475,13 +479,57 @@ The first event should report `proxyCached: False`, `proxyFps: 2`, and either an
   "ffmpegPath": "ffmpeg",
   "analysisStallTimeoutSeconds": 300,
   "analysisMaxTimeoutSeconds": 2700,
+  "promptServiceUrl": "https://apexiel-prompt-service-316801639479.us-west1.run.app",
+  "promptFetchTimeoutSeconds": 5,
   "useDevStub": false
 }
 ```
 
 Relative `analyzeScript` paths resolve from the application root. `analysisStallTimeoutSeconds` defaults to 300 seconds and resets whenever valid progress or diagnostic activity arrives. `analysisMaxTimeoutSeconds` defaults to 2700 seconds and remains an absolute ceiling; it must be greater than the stall timeout. The accepted upper limits are 1800 and 7200 seconds respectively. Existing configurations containing only `analysisTimeoutSeconds` remain compatible and use that value as the stall timeout. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes result load/discard operations with no path argument, so the renderer can only consume the schema-validated result recorded for the active analysis run.
 
+### Remote prompt selection
+
+`promptServiceUrl` identifies the public active-profile endpoint and must use
+HTTPS outside local development. `promptFetchTimeoutSeconds` defaults to five
+seconds and cannot exceed 30 seconds. Before each real analysis, Electron
+validates the active profile, its schema version, field bounds, and
+`minimumClientVersion`. Valid profiles are stored atomically as
+`prompt-profile-cache.json` under Electron's `userData` directory.
+
+Electron sends the cached ETag on later requests. A `304` reuses the cache; a
+network, timeout, malformed-response, or compatibility failure uses the last
+valid cache. If no valid cache exists, analysis continues with the built-in
+domain prompt. The Gemini model, credentials, JSON response schema, timestamp
+rules, and application behavior remain local and cannot be changed by a
+profile. The main-process console records the selected profile ID, version,
+and whether its source was `remote`, `cache`, or `built-in`.
+
 Before real analysis starts, Electron verifies that the selected Python can import `google.genai` and `jsonschema`. If a non-absolute `pythonPath` resolves to an incomplete virtual environment or older Python on Windows, the app checks interpreters reported by the Python launcher and `where.exe` and uses the first compatible installation. An explicitly configured absolute path is never overridden. If none qualify, the startup dialog lists the checked interpreter paths and an exact installation command. This preflight runs before proxy generation.
+
+### Remote prompt verification
+
+Run the automated client and pipeline checks:
+
+```powershell
+npm test
+python -m unittest discover -s pipeline/tests -v
+```
+
+Verify the published profile independently of Gemini:
+
+```powershell
+$serviceUrl = 'https://apexiel-prompt-service-316801639479.us-west1.run.app'
+Invoke-RestMethod "$serviceUrl/v1/prompt-profiles/active" |
+  ConvertTo-Json -Depth 10
+```
+
+The response must contain `schemaVersion: 1` and the published profile. Start
+Electron from PowerShell with `GEMINI_API_KEY`, then run **Detect Vehicles**.
+The main-process output must report `motorsports-default` and its published
+version. A fresh cache reports `remote`; a later unchanged request reports
+`cache`. Automated tests cover unavailable service, malformed response,
+incompatible minimum client version, and built-in fallback without making
+Gemini calls.
 
 ### CP3 application verification
 
@@ -638,7 +686,8 @@ The isolated preload API exposes project-location, project-creation, video-impor
 - `clip-export.js` - validated filename construction, ffmpeg argument construction, atomic clip publication, and collision handling
 - `analysis-lifecycle.js` - protocol validation, progress-aware watchdogs, staged error formatting, work-directory cleanup, and process-tree termination
 - `project-workspace.js` - project-name validation, workspace paths, and collision-safe video imports
-- `config.json` - Python, analysis-script, ffmpeg, stall/maximum timeouts, and offline-stub selection
+- `prompt-profile-client.js` - remote profile validation, ETag caching, compatibility checks, and fallback selection
+- `config.json` - Python, analysis-script, ffmpeg, prompt-service, timeout, and offline-stub selection
 - `python-runtime.js` - Python discovery and pipeline dependency preflight
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup
@@ -651,6 +700,8 @@ The isolated preload API exposes project-location, project-creation, video-impor
 - `pipeline/analyze.py` - standalone real-analysis entry point, optimized CFR proxy generation, and cache management
 - `pipeline/gemini_harness/` - minimally adapted Gemini harness API, prompt, and response parser
 - `pipeline/stages.py` - upload, processing, analysis, normalization, and schema validation
+- `cloud/prompt-service/` - versioned remote prompt publication service
+- `cloud/analysis-service/` - private Cloud Run boundary for cloud analysis jobs
 - `detections.schema.json` - frozen real-analysis result contract
 
 The renderer has no direct Node.js access; privileged operations remain behind the preload IPC boundary.

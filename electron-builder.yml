@@ -13,6 +13,8 @@ files:
   - runtime-config.js
   - runtime-paths.js
   - project-workspace.js
+  - prompt-profile-client.js
+  - python-runtime.js
   - renderer/**/*
   - package.json
 

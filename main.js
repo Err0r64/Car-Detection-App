@@ -4,6 +4,7 @@ const fs = require('fs');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
 const {
+  createAnalysisWatchdog,
   formatAnalysisFailure,
   removeRunDirectory,
   terminateProcessTree,
@@ -19,6 +20,11 @@ const {
   runtimeRoot,
 } = require('./runtime-paths');
 const { parseConfigJson } = require('./runtime-config');
+const { resolvePythonRuntime } = require('./python-runtime');
+const {
+  normalizeServiceUrl,
+  resolvePromptProfile,
+} = require('./prompt-profile-client');
 const {
   cleanProjectName,
   importVideoFile,
@@ -31,8 +37,15 @@ const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
   analyzeScript: 'pipeline/analyze.py',
   ffmpegPath: 'ffmpeg',
-  analysisTimeoutSeconds: 15 * 60,
+  analysisStallTimeoutSeconds: 5 * 60,
+  analysisMaxTimeoutSeconds: 45 * 60,
+  promptServiceUrl: 'https://apexiel-prompt-service-316801639479.us-west1.run.app',
+  promptFetchTimeoutSeconds: 5,
   useDevStub: false,
+};
+const ANALYSIS_CONFIG_LIMITS = {
+  stallSeconds: 30 * 60,
+  maxSeconds: 2 * 60 * 60,
 };
 
 function readAnalysisConfig() {
@@ -41,22 +54,44 @@ function readAnalysisConfig() {
   if (fs.existsSync(configPath)) {
     configured = parseConfigJson(fs.readFileSync(configPath, 'utf8'));
   }
+
+  if (
+    Object.prototype.hasOwnProperty.call(configured, 'analysisTimeoutSeconds')
+    && !Object.prototype.hasOwnProperty.call(configured, 'analysisStallTimeoutSeconds')
+  ) {
+    configured.analysisStallTimeoutSeconds = configured.analysisTimeoutSeconds;
+  }
+
   const config = { ...ANALYSIS_CONFIG_DEFAULTS, ...configured };
   for (const key of ['pythonPath', 'analyzeScript', 'ffmpegPath']) {
     if (typeof config[key] !== 'string' || !config[key].trim()) {
-      throw new Error(`config.json ${key} must be a non-empty string.`);
+      throw new Error('config.json ' + key + ' must be a non-empty string.');
     }
   }
   if (typeof config.useDevStub !== 'boolean') {
     throw new Error('config.json useDevStub must be true or false.');
   }
-  if (
-    !Number.isFinite(config.analysisTimeoutSeconds)
-    || config.analysisTimeoutSeconds <= 0
-    || config.analysisTimeoutSeconds > ANALYSIS_CONFIG_DEFAULTS.analysisTimeoutSeconds
-  ) {
+  config.promptServiceUrl = normalizeServiceUrl(config.promptServiceUrl);
+
+  const timeoutLimits = {
+    analysisStallTimeoutSeconds: ANALYSIS_CONFIG_LIMITS.stallSeconds,
+    analysisMaxTimeoutSeconds: ANALYSIS_CONFIG_LIMITS.maxSeconds,
+    promptFetchTimeoutSeconds: 30,
+  };
+  for (const [key, maximum] of Object.entries(timeoutLimits)) {
+    if (
+      !Number.isFinite(config[key])
+      || config[key] <= 0
+      || config[key] > maximum
+    ) {
+      throw new Error(
+        'config.json ' + key + ' must be greater than 0 and no more than ' + maximum + '.'
+      );
+    }
+  }
+  if (config.analysisMaxTimeoutSeconds <= config.analysisStallTimeoutSeconds) {
     throw new Error(
-      'config.json analysisTimeoutSeconds must be greater than 0 and no more than 900.'
+      'config.json analysisMaxTimeoutSeconds must be greater than analysisStallTimeoutSeconds.'
     );
   }
   return config;
@@ -402,6 +437,8 @@ ipcMain.handle('load-project', async (event) => {
 // --- Analysis pipeline ---
 
 let analysisChild = null;
+let analysisStarting = false;
+let verifiedPythonRuntime = null;
 let analysisResultPath = null;
 let analysisRunDirectory = null;
 let terminateActiveAnalysis = null;
@@ -493,7 +530,7 @@ function killAnalysis() {
   if (terminateActiveAnalysis) terminateActiveAnalysis('canceled');
 }
 
-ipcMain.handle('start-analysis', (event, videoPath) => {
+async function startAnalysis(event, videoPath) {
   if (analysisChild || activeExport) return false;
 
   if (analysisRunDirectory && !discardAnalysisResults()) {
@@ -548,6 +585,75 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
     return false;
   }
 
+  let pythonCommand = config.pythonPath;
+  if (!config.useDevStub) {
+    if (
+      !verifiedPythonRuntime
+      || verifiedPythonRuntime.configuredPath !== config.pythonPath
+    ) {
+      const resolution = resolvePythonRuntime(config.pythonPath);
+      if (!resolution.command) {
+        const checked = resolution.attempted.length > 0
+          ? resolution.attempted.join(', ')
+          : config.pythonPath;
+        const installTarget = resolution.attempted[0] || config.pythonPath;
+        const requirementsPath = path.join(
+          appResourceRoot(),
+          'pipeline',
+          'requirements.txt'
+        );
+        const newline = String.fromCharCode(10);
+        dialog.showErrorBox(
+          'Analysis dependencies missing',
+          formatAnalysisFailure(
+            'startup',
+            'Could not find a Python installation containing google-genai and jsonschema.'
+              + newline + 'Checked: ' + checked
+              + newline + 'Install the pipeline packages with: "'
+              + installTarget
+              + '" -m pip install -r "'
+              + requirementsPath
+              + '"'
+          )
+        );        return false;
+      }
+      verifiedPythonRuntime = {
+        configuredPath: config.pythonPath,
+        command: resolution.command,
+      };
+    }
+    pythonCommand = verifiedPythonRuntime.command;
+  }
+
+  let promptSelection = {
+    source: 'built-in',
+    envelope: null,
+    reason: 'Development stub does not call Gemini.',
+  };
+  if (!config.useDevStub) {
+    try {
+      promptSelection = await resolvePromptProfile({
+        serviceUrl: config.promptServiceUrl,
+        cachePath: path.join(app.getPath('userData'), 'prompt-profile-cache.json'),
+        clientVersion: app.getVersion(),
+        timeoutMs: config.promptFetchTimeoutSeconds * 1000,
+      });
+    } catch (error) {
+      promptSelection = {
+        source: 'built-in',
+        envelope: null,
+        reason: `Prompt selection failed; using built-in prompt. ${error.message}`,
+      };
+    }
+  }
+  const selectedProfile = promptSelection.envelope && promptSelection.envelope.profile;
+  const promptLabel = selectedProfile
+    ? `${selectedProfile.profileId} v${selectedProfile.version}`
+    : 'built-in';
+  console.info(`[prompt-profile] Using ${promptLabel} (${promptSelection.source}).`);
+  console.info(`[prompt-profile] ${promptSelection.reason}`);
+  if (promptSelection.warning) console.warn(`[prompt-profile] ${promptSelection.warning}`);
+
   let runDirectory;
   try {
     runDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'capstone-analysis-'));
@@ -561,6 +667,27 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
 
   analysisRunDirectory = runDirectory;
   const expectedResultPath = path.join(runDirectory, 'results.json');
+  let promptProfilePath = null;
+  if (promptSelection.envelope) {
+    promptProfilePath = path.join(runDirectory, 'prompt-profile.json');
+    try {
+      fs.writeFileSync(
+        promptProfilePath,
+        JSON.stringify(promptSelection.envelope, null, 2) + '\n',
+        'utf8'
+      );
+    } catch (error) {
+      cleanupAnalysisRunDirectory(runDirectory);
+      dialog.showErrorBox(
+        'Analysis failed to start',
+        formatAnalysisFailure(
+          'startup',
+          `Could not prepare the selected prompt profile: ${error.message}`
+        )
+      );
+      return false;
+    }
+  }
   const args = config.useDevStub
     ? [
       '-u',
@@ -580,6 +707,11 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
       expectedResultPath,
       '--ffmpeg-path',
       config.ffmpegPath,
+      '--proxy-cache-dir',
+      path.join(path.dirname(videoPath), '.analysis-cache'),
+      '--prompt-source',
+      promptSelection.source,
+      ...(promptProfilePath ? ['--prompt-profile', promptProfilePath] : []),
     ];
 
   const sender = event.sender;
@@ -594,7 +726,7 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
 
   let child;
   try {
-    child = spawn(config.pythonPath, args, {
+    child = spawn(pythonCommand, args, {
       cwd: appResourceRoot(),
       detached: process.platform !== 'win32',
       env: childEnvironment,
@@ -620,13 +752,13 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
   let terminationReason = null;
   let pendingDoneEvent = null;
   let pendingFailure = null;
-  let timeoutTimer = null;
+  let watchdog = null;
   let forceKillTimer = null;
 
   const clearRunTimers = () => {
-    if (timeoutTimer) {
-      clearTimeout(timeoutTimer);
-      timeoutTimer = null;
+    if (watchdog) {
+      watchdog.stop();
+      watchdog = null;
     }
     if (forceKillTimer) {
       clearTimeout(forceKillTimer);
@@ -659,10 +791,7 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
   const stopChild = (reason) => {
     if (terminationReason) return;
     terminationReason = reason;
-    if (timeoutTimer) {
-      clearTimeout(timeoutTimer);
-      timeoutTimer = null;
-    }
+    clearRunTimers();
     forceKillTimer = terminateProcessTree(child);
   };
 
@@ -718,6 +847,7 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
       queueFailure(activeStage, `Invalid analysis progress event: ${validationError}.`);
       return;
     }
+    if (watchdog) watchdog.touch();
     forwardProtocolEvent(protocolEvent);
   };
 
@@ -736,7 +866,10 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
     stderrBuffer = lines.pop();
     for (const line of lines) {
       const text = line.trim();
-      if (text) lastStderr = text;
+      if (text) {
+        lastStderr = text;
+        if (watchdog) watchdog.touch();
+      }
     }
   });
 
@@ -782,17 +915,43 @@ ipcMain.handle('start-analysis', (event, videoPath) => {
     if (terminalKind !== 'done') cleanupAnalysisRunDirectory(runDirectory);
   });
 
-  timeoutTimer = setTimeout(() => {
-    if (analysisChild !== child || terminalKind || terminationReason) return;
-    sendFailure(
-      activeStage,
-      `Analysis timed out after ${config.analysisTimeoutSeconds} seconds.`
-    );
-    stopChild('timeout');
-  }, config.analysisTimeoutSeconds * 1000);
-  if (typeof timeoutTimer.unref === 'function') timeoutTimer.unref();
+  watchdog = createAnalysisWatchdog({
+    stallMs: config.analysisStallTimeoutSeconds * 1000,
+    maxMs: config.analysisMaxTimeoutSeconds * 1000,
+    onStall: () => {
+      if (analysisChild !== child || terminalKind || terminationReason) return;
+      sendFailure(
+        activeStage,
+        'Analysis stopped reporting progress for '
+          + config.analysisStallTimeoutSeconds
+          + ' seconds.'
+      );
+      stopChild('timeout');
+    },
+    onMax: () => {
+      if (analysisChild !== child || terminalKind || terminationReason) return;
+      sendFailure(
+        activeStage,
+        'Analysis exceeded the maximum run time of '
+          + config.analysisMaxTimeoutSeconds
+          + ' seconds.'
+      );
+      stopChild('timeout');
+    },
+  });
+  watchdog.start();
 
   return true;
+}
+
+ipcMain.handle('start-analysis', async (event, videoPath) => {
+  if (analysisStarting || analysisChild || activeExport) return false;
+  analysisStarting = true;
+  try {
+    return await startAnalysis(event, videoPath);
+  } finally {
+    analysisStarting = false;
+  }
 });
 
 ipcMain.on('cancel-analysis', () => killAnalysis());
@@ -800,7 +959,7 @@ ipcMain.on('cancel-analysis', () => killAnalysis());
 // --- Clip export ---
 
 ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
-  if (analysisChild || activeExport) return null;
+  if (analysisStarting || analysisChild || activeExport) return null;
   const win = BrowserWindow.fromWebContents(event.sender);
   const options = {
     title: 'Choose Export Folder',
@@ -819,7 +978,7 @@ ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
 });
 
 ipcMain.handle('export-clips', async (event, request) => {
-  if (analysisChild || activeExport) {
+  if (analysisStarting || analysisChild || activeExport) {
     return { ok: false, error: 'Another analysis or export is already running.' };
   }
   if (!request || typeof request !== 'object' || Array.isArray(request)) {

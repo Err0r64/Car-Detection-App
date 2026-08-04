@@ -4,8 +4,10 @@ This service is the cloud control plane for versioned analysis prompts. It runs
 independently from the Electron application so Apexiel can publish prompt changes
 without rebuilding or redistributing the desktop installer.
 
-This checkpoint only hosts prompt profiles. The desktop still creates the proxy
-and calls Gemini locally until the next integration checkpoint.
+This service hosts only prompt profiles. Before real analysis, the desktop reads
+and caches the active domain instructions, then combines them with its local
+response contract. Proxy creation and authenticated Gemini calls continue to run
+locally in the desktop pipeline.
 
 ## Service boundary
 

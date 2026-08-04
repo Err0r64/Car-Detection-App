@@ -2,6 +2,9 @@
   "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
-  "analysisTimeoutSeconds": 900,
+  "analysisStallTimeoutSeconds": 300,
+  "analysisMaxTimeoutSeconds": 2700,
+  "promptServiceUrl": "https://apexiel-prompt-service-316801639479.us-west1.run.app",
+  "promptFetchTimeoutSeconds": 5,
   "useDevStub": false
 }

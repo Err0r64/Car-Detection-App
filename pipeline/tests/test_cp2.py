@@ -17,7 +17,9 @@ from analyze import (  # noqa: E402
     MAX_PROXY_HEIGHT,
     PROXY_CRF,
     PROXY_FPS,
+    PipelineError,
     create_proxy,
+    load_prompt_selection,
     probe_frame_rate,
     proxy_cache_path,
     proxy_stage,
@@ -73,6 +75,52 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertIn("Never return\none appearance from 12 to 52", prompt)
         self.assertIn("Do not extend an appearance through footage", prompt)
         self.assertIn("Do not create overlapping duplicate entries", prompt)
+
+    def test_remote_domain_instructions_keep_the_local_response_contract(self) -> None:
+        instructions = "REMOTE DOMAIN: report one entry per physical race vehicle."
+        prompt = render_prompt(114.933, instructions)
+
+        self.assertTrue(prompt.startswith(instructions))
+        self.assertIn('"appearance_id"', prompt)
+        self.assertIn("The video content provided is 114.933 seconds long", prompt)
+        self.assertIn("one minute ten seconds is 70", prompt)
+        self.assertNotIn("TARGET VEHICLE:", prompt)
+
+    def test_loads_a_valid_desktop_prompt_profile(self) -> None:
+        payload = {
+            "schemaVersion": 1,
+            "profile": {
+                "profileId": "motorsports-default",
+                "version": 2,
+                "instructions": "Report every physical vehicle separately.",
+            },
+        }
+        profile_path = Path(__file__).with_name(".cp2-valid-prompt-profile.json")
+        try:
+            profile_path.write_text(json.dumps(payload), encoding="utf-8")
+            selection = load_prompt_selection(profile_path, "remote")
+        finally:
+            profile_path.unlink(missing_ok=True)
+
+        self.assertEqual(selection.source, "remote")
+        self.assertEqual(selection.profile_id, "motorsports-default")
+        self.assertEqual(selection.version, 2)
+        self.assertEqual(
+            selection.instructions,
+            "Report every physical vehicle separately.",
+        )
+
+    def test_rejects_an_invalid_desktop_prompt_profile(self) -> None:
+        profile_path = Path(__file__).with_name(".cp2-invalid-prompt-profile.json")
+        try:
+            profile_path.write_text(
+                json.dumps({"schemaVersion": 1, "profile": {}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(PipelineError):
+                load_prompt_selection(profile_path, "cache")
+        finally:
+            profile_path.unlink(missing_ok=True)
 
     def test_client_uses_blocking_seeded_json_request(self) -> None:
         raw_response = response(

@@ -1,2 +1,7 @@
 fastapi==0.141.1
+google-cloud-storage==3.13.0
+google-cloud-tasks==2.23.0
+google-genai==2.6.0
+httpx==0.28.1
+jsonschema>=4.0,<5
 uvicorn==0.52.0

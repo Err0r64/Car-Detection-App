@@ -21,6 +21,21 @@ last valid revision, and passes the selected profile to the local Gemini pipelin
 
 See `cloud/prompt-service/README.md` for local verification, Google Cloud deployment, security boundaries, token rotation, and Apexiel handoff steps.
 
+## Cloud Analysis Service
+
+The private Cloud Run analysis service is located in
+`cloud/analysis-service`. CP1 established authenticated invocation. CP2 adds a
+private regional Cloud Storage bucket, persistent job records, 15-minute signed
+proxy uploads, upload confirmation, cancellation cleanup, and automatic
+one-day/seven-day object lifecycle rules. CP3 adds durable task dispatch,
+generation-pinned SHA-256 verification, active remote-prompt loading, a Secret
+Manager-backed Gemini worker, bounded retries, and persistent terminal results.
+The Electron application continues calling Gemini locally with `GEMINI_API_KEY`
+until its cloud client and production authentication migration are complete.
+
+See `cloud/analysis-service/README.md` for the API contract, infrastructure,
+least-privilege IAM policy, and links to the CP3 operations and verification guide.
+
 ## Prerequisites
 
 - Node.js LTS, including npm

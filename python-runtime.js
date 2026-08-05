@@ -9,6 +9,7 @@ const DEPENDENCY_CHECK = [
   'import google.genai',
   'import jsonschema',
 ].join('; ');
+const BASIC_RUNTIME_CHECK = 'import sys; print(sys.executable)';
 
 function lines(value) {
   if (typeof value !== 'string') return [];
@@ -41,12 +42,12 @@ function pythonPathsFromOutput(output) {
   return paths;
 }
 
-function runCandidate(candidate, runProcess) {
+function runCandidate(candidate, runProcess, dependencyCheck) {
   let result;
   try {
     result = runProcess(
       candidate,
-      ['-c', DEPENDENCY_CHECK],
+      ['-c', dependencyCheck],
       {
         encoding: 'utf8',
         windowsHide: true,
@@ -100,6 +101,7 @@ function resolvePythonRuntime(configuredPath, options = {}) {
 
   const platform = options.platform || process.platform;
   const runProcess = options.runProcess || spawnSync;
+  const dependencyCheck = options.dependencyCheck || DEPENDENCY_CHECK;
   const attempted = [];
   const checked = new Set();
 
@@ -116,7 +118,7 @@ function resolvePythonRuntime(configuredPath, options = {}) {
       return null;
     }
 
-    const result = runCandidate(candidate, runProcess);
+    const result = runCandidate(candidate, runProcess, dependencyCheck);
     attempted.push(result.candidate);
     return result.ok ? result.candidate : null;
   };
@@ -135,6 +137,7 @@ function resolvePythonRuntime(configuredPath, options = {}) {
 }
 
 module.exports = {
+  BASIC_RUNTIME_CHECK,
   DEPENDENCY_CHECK,
   pythonPathsFromOutput,
   resolvePythonRuntime,

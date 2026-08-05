@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Installer/packaging CP1 creates a Windows unpacked build with installation-safe resource paths and is awaiting manual confirmation.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Installer/packaging CP1 creates a Windows unpacked build with installation-safe resource paths and is awaiting manual confirmation. Cloud Analysis CP4 now routes real desktop detection through the private Cloud Run job API using short-lived development identity tokens; installer-grade interactive authentication remains pending.
 
 The following optional work remains intentionally deferred:
 
@@ -16,36 +16,34 @@ The following optional work remains intentionally deferred:
 The Cloud Run prompt-control service is located in `cloud/prompt-service`. It
 provides immutable draft revisions, explicit publication, a public active-profile
 endpoint, Firestore persistence, and a Secret Manager-backed administrator token.
-Electron now retrieves the active domain instructions before analysis, caches the
-last valid revision, and passes the selected profile to the local Gemini pipeline.
+The Cloud Run analysis worker retrieves and validates the active profile for each
+job; Electron no longer downloads or caches prompt instructions.
 
 See `cloud/prompt-service/README.md` for local verification, Google Cloud deployment, security boundaries, token rotation, and Apexiel handoff steps.
-
 ## Cloud Analysis Service
 
 The private Cloud Run analysis service is located in
-`cloud/analysis-service`. CP1 established authenticated invocation. CP2 adds a
-private regional Cloud Storage bucket, persistent job records, 15-minute signed
-proxy uploads, upload confirmation, cancellation cleanup, and automatic
-one-day/seven-day object lifecycle rules. CP3 adds durable task dispatch,
-generation-pinned SHA-256 verification, active remote-prompt loading, a Secret
-Manager-backed Gemini worker, bounded retries, and persistent terminal results.
-The Electron application continues calling Gemini locally with `GEMINI_API_KEY`
-until its cloud client and production authentication migration are complete.
+`cloud/analysis-service`. CP1 established authenticated invocation, CP2 added
+private proxy storage and persistent job records, and CP3 added Cloud Tasks,
+integrity verification, remote prompt loading, Secret Manager-backed Gemini,
+bounded retries, and terminal results. CP4 migrates real Electron analysis to
+this API: the desktop creates the CFR proxy locally, uploads it through a signed
+URL, polls the private job, validates results, and deletes completed cloud data.
+The desktop no longer requires or receives `GEMINI_API_KEY`.
 
-See `cloud/analysis-service/README.md` for the API contract, infrastructure,
-least-privilege IAM policy, and links to the CP3 operations and verification guide.
-
+Development runs authenticate with the signed-in Google Cloud CLI identity. This
+is not the final installer-grade user authentication design. See
+`cloud/analysis-service/CP4-OPERATIONS.md` for the exact boundary and tests.
 ## Prerequisites
 
 - Node.js LTS, including npm
 - Python 3 available as `python` on `PATH`
 - `ffmpeg` and `ffprobe` available on `PATH`
-- `GEMINI_API_KEY` in the environment for real analysis
-- Pipeline packages installed with `python -m pip install -r pipeline\requirements.txt`
+- Google Cloud CLI installed and signed in for real cloud analysis
+- The signed-in account granted `roles/run.invoker` on the analysis service
 
-Detect Vehicles uses the real pipeline by default. Start Electron from the same shell that contains `GEMINI_API_KEY` so the child process inherits it.
-
+The local desktop needs no Gemini SDK or Gemini API key. Python and FFmpeg create
+the proxy; Cloud Run owns prompt selection and Gemini execution.
 ## Run
 
 ```powershell
@@ -57,7 +55,7 @@ npm start
 
 CP1 establishes the package boundary before creating an installer. `electron-builder.yml` places the Electron main and renderer code in `resources\app.asar`, while `config.json`, `detections.schema.json`, `pipeline`, and `stub` are copied to the external `resources` directory so system Python can execute them. Development builds continue resolving those files from the repository. The `runtime-paths.js` boundary selects the correct root in each environment.
 
-The unpacked build still expects Python and its pipeline packages, ffmpeg, and ffprobe on the host system. CP1 does not bundle those runtimes and does not produce an installer. The build uses a local staging directory because executable patching and ASAR cleanup are unreliable on the mapped `Z:` workspace.
+The unpacked build still expects Python, ffmpeg, and ffprobe on the host system. Cloud-analysis development runs also require an authenticated Google Cloud CLI; the desktop no longer needs local Gemini packages. CP1 does not bundle these runtimes or provide installer-grade sign-in. The build uses a local staging directory because executable patching and ASAR cleanup are unreliable on the mapped `Z:` workspace.
 
 ### CP1 packaged-build verification
 
@@ -485,7 +483,7 @@ The first event should report `proxyCached: False`, `proxyFps: 2`, and either an
 
 ## Application Analysis Configuration
 
-`config.json` controls the main-process child command:
+`config.json` controls local proxy creation and the private cloud client:
 
 ```json
 {
@@ -494,74 +492,61 @@ The first event should report `proxyCached: False`, `proxyFps: 2`, and either an
   "ffmpegPath": "ffmpeg",
   "analysisStallTimeoutSeconds": 300,
   "analysisMaxTimeoutSeconds": 2700,
-  "promptServiceUrl": "https://apexiel-prompt-service-316801639479.us-west1.run.app",
-  "promptFetchTimeoutSeconds": 5,
+  "analysisServiceUrl": "https://apexiel-analysis-service-316801639479.us-west1.run.app",
+  "analysisGcloudPath": "gcloud.cmd",
+  "analysisPollIntervalSeconds": 5,
+  "analysisRequestTimeoutSeconds": 30,
   "useDevStub": false
 }
 ```
 
-Relative `analyzeScript` paths resolve from the application root. `analysisStallTimeoutSeconds` defaults to 300 seconds and resets whenever valid progress or diagnostic activity arrives. `analysisMaxTimeoutSeconds` defaults to 2700 seconds and remains an absolute ceiling; it must be greater than the stall timeout. The accepted upper limits are 1800 and 7200 seconds respectively. Existing configurations containing only `analysisTimeoutSeconds` remain compatible and use that value as the stall timeout. Real mode fails before spawning when `GEMINI_API_KEY` is absent. The preload exposes result load/discard operations with no path argument, so the renderer can only consume the schema-validated result recorded for the active analysis run.
+Relative `analyzeScript` paths resolve from the application root.
+`analysisServiceUrl` must use HTTPS outside localhost. The stall watchdog resets
+on proxy output, upload progress, and successful cloud polls; the maximum timeout
+covers the complete local-and-cloud run. Poll intervals cannot exceed 60 seconds
+and individual authenticated request timeouts cannot exceed 120 seconds.
 
-### Remote prompt selection
+Real mode runs `pipeline/analyze.py --proxy-only`, explicitly removes
+`GEMINI_API_KEY` from the proxy child environment, obtains a short-lived Google
+identity token, and calls Cloud Run. The selected Python only needs the standard
+library for this path. The preload exposes result load/discard operations with no
+path argument, so the renderer can consume only the schema-validated result
+recorded for the active run.
 
-`promptServiceUrl` identifies the public active-profile endpoint and must use
-HTTPS outside local development. `promptFetchTimeoutSeconds` defaults to five
-seconds and cannot exceed 30 seconds. Before each real analysis, Electron
-validates the active profile, its schema version, field bounds, and
-`minimumClientVersion`. Valid profiles are stored atomically as
-`prompt-profile-cache.json` under Electron's `userData` directory.
+### Remote prompt ownership
 
-Electron sends the cached ETag on later requests. A `304` reuses the cache; a
-network, timeout, malformed-response, or compatibility failure uses the last
-valid cache. If no valid cache exists, analysis continues with the built-in
-domain prompt. The Gemini model, credentials, JSON response schema, timestamp
-rules, and application behavior remain local and cannot be changed by a
-profile. The main-process console records the selected profile ID, version,
-and whether its source was `remote`, `cache`, or `built-in`.
+Electron no longer selects or caches the active prompt. The private worker fetches
+the published profile directly from the prompt service, verifies its ETag and
+schema, and persists profile ID, version, and ETag with the completed job. The
+Gemini key and prompt instructions never enter the desktop process.
+### Cloud analysis CP4 verification
 
-Before real analysis starts, Electron verifies that the selected Python can import `google.genai` and `jsonschema`. If a non-absolute `pythonPath` resolves to an incomplete virtual environment or older Python on Windows, the app checks interpreters reported by the Python launcher and `where.exe` and uses the first compatible installation. An explicitly configured absolute path is never overridden. If none qualify, the startup dialog lists the checked interpreter paths and an exact installation command. This preflight runs before proxy generation.
-
-### Remote prompt verification
-
-Run the automated client and pipeline checks:
+Run the automated desktop and pipeline checks:
 
 ```powershell
 npm test
-python -m unittest discover -s pipeline/tests -v
+python -m unittest pipeline.tests.test_cp2
 ```
 
-Verify the published profile independently of Gemini:
+Verify the published prompt independently of Gemini:
 
 ```powershell
-$serviceUrl = 'https://apexiel-prompt-service-316801639479.us-west1.run.app'
-Invoke-RestMethod "$serviceUrl/v1/prompt-profiles/active" |
+$promptUrl = 'https://apexiel-prompt-service-316801639479.us-west1.run.app'
+Invoke-RestMethod "$promptUrl/v1/prompt-profiles/active" |
   ConvertTo-Json -Depth 10
 ```
 
-The response must contain `schemaVersion: 1` and the published profile. Start
-Electron from PowerShell with `GEMINI_API_KEY`, then run **Detect Vehicles**.
-The main-process output must report `motorsports-default` and its published
-version. A fresh cache reports `remote`; a later unchanged request reports
-`cache`. Automated tests cover unavailable service, malformed response,
-incompatible minimum client version, and built-in fallback without making
-Gemini calls.
-
-### CP3 application verification
-
-Launch Electron from the PowerShell session containing the API key:
+Verify the desktop identity can reach the private analysis service without an
+upload or Gemini call:
 
 ```powershell
-$env:GEMINI_API_KEY = 'your-key-from-Google-AI-Studio'
-npm start
+gcloud auth print-identity-token | Out-Null
+node -e "const {createGcloudIdentityToken,CloudAnalysisClient}=require('./cloud-analysis-client'); (async()=>{const token=await createGcloudIdentityToken({gcloudPath:'gcloud.cmd'}); const client=new CloudAnalysisClient({serviceUrl:'https://apexiel-analysis-service-316801639479.us-west1.run.app',identityToken:token}); console.log(await client.request('/v1/capabilities',{stage:'authentication'}));})().catch(error=>{console.error(error.message);process.exit(1)})"
 ```
 
-1. Open or create a project, select **Import Video**, and choose `cp2-manual\short-cfr-video.mp4`.
-2. Select **Detect Vehicles**. The status should advance through Creating proxy, Uploading, Processing, Analyzing, and Parsing results; Analyzing should show a token count.
-3. On completion, real detections should populate the timeline and Analysis panel. The status should report the detection count, and **Save Changes** should be enabled.
-4. Select **Save Changes**, choose a `.vproj.json` path if prompted, then use **Load Project** to confirm the same detections return.
-5. Edit one detection, run **Detect Vehicles** again, and wait for completion. The overwrite prompt should offer **Save**, **Discard**, and **Cancel**. Cancel keeps the edited detections; Discard replaces them with the new model results; Save writes the current detections before replacement.
-
-### CP4 application verification (confirmed)
+All four capability flags must be `true`. Complete manual application and cleanup
+steps are in `cloud/analysis-service/CP4-OPERATIONS.md`.
+### Phase 5 lifecycle verification (confirmed)
 
 Run the automated lifecycle and pipeline regression tests first:
 
@@ -615,29 +600,28 @@ The dialog must identify the `processing` stage and report malformed JSONL progr
 
 Keep stub mode enabled, set `analysisStallTimeoutSeconds` to `3`, keep `analysisMaxTimeoutSeconds` at `2700`, and run `npm start`. Start an analysis and do not cancel it. After three seconds without a protocol event, a visible error must identify the current stage and state that analysis stopped reporting progress for 3 seconds. The controls must return to idle, with no surviving work directory or Python process. Restore `analysisStallTimeoutSeconds` to `300` afterward.
 
-#### Missing key and unreachable API
+#### Cloud authentication and unavailable service
 
-Set `useDevStub` to `false` and keep the stall and maximum timeouts at `300` and `2700`. In a PowerShell session without the key, run:
+Set `useDevStub` to `false`, remove any local Gemini key, and verify that the
+signed-in Cloud identity is available:
 
 ```powershell
 Remove-Item Env:GEMINI_API_KEY -ErrorAction SilentlyContinue
+gcloud auth print-identity-token | Out-Null
 npm start
 ```
 
-Open a video and select **Detect Vehicles**. Analysis must not start, and the dialog must identify the `startup` stage and missing `GEMINI_API_KEY`.
+**Detect Vehicles** must continue without a missing-key dialog. To verify bounded
+authentication failure, close Electron, temporarily set `analysisGcloudPath` to
+`missing-gcloud.cmd`, restart, and run detection. After proxy creation, the dialog
+must identify the `authentication` stage and no local Gemini fallback may occur.
+Restore `analysisGcloudPath` afterward.
 
-To exercise an unreachable API with a valid key while leaving the rest of the network unchanged, start Electron through a deliberately closed local proxy:
-
-```powershell
-$env:GEMINI_API_KEY = 'your-valid-key'
-$env:HTTPS_PROXY = 'http://127.0.0.1:9'
-$env:HTTP_PROXY = $env:HTTPS_PROXY
-npm start
-Remove-Item Env:HTTPS_PROXY, Env:HTTP_PROXY
-```
-
-Run an analysis and wait for proxy generation to finish. The request must fail visibly in the `upload` stage with the connection failure included in the dialog. After closing Electron, the process and work-directory checks must again print no rows.
-
+To verify an unreachable cloud endpoint, temporarily set `analysisServiceUrl` to
+`https://127.0.0.1:9`, restart, and run detection. The dialog must identify the
+`upload` stage and report that the analysis service could not be reached. Restore
+the production URL after the check. Canceled and failed runs must leave no local
+analysis work directory or Python process.
 ## Timeline Core
 
 After a video loads, the editor displays a fit-to-width timeline beneath the player:

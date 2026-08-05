@@ -20,8 +20,6 @@ import subprocess
 import sys
 from typing import Any
 
-from stages import AnalysisStageError, run_post_proxy
-
 
 PROXY_CRF = 21
 PROXY_FPS = 2.0
@@ -581,6 +579,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="exercise every stage with a canned Gemini response and no API request",
     )
+    parser.add_argument(
+        "--proxy-only",
+        action="store_true",
+        help="create and validate the CFR proxy without calling Gemini",
+    )
     return parser.parse_args(argv)
 
 
@@ -595,7 +598,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_selection = load_prompt_selection(args.prompt_profile, args.prompt_source)
+        prompt_selection = (
+            PromptSelection(instructions=None, source="cloud")
+            if args.proxy_only
+            else load_prompt_selection(args.prompt_profile, args.prompt_source)
+        )
         cache_directory = (
             args.proxy_cache_dir.expanduser().resolve()
             if args.proxy_cache_dir is not None
@@ -618,22 +625,26 @@ def main(argv: list[str] | None = None) -> int:
             args.ffprobe_path,
             reuse_existing=cache_directory is not None,
         )
-        run_post_proxy(
-            proxy_path,
-            output_path,
-            proxy_result["sourceDurationS"],
-            emit,
-            dry_run=args.dry_run,
-            prompt_instructions=prompt_selection.instructions,
-            prompt_profile_id=prompt_selection.profile_id,
-            prompt_profile_version=prompt_selection.version,
-            prompt_source=prompt_selection.source,
-        )
+        if not args.proxy_only:
+            from stages import AnalysisStageError, run_post_proxy
+
+            try:
+                run_post_proxy(
+                    proxy_path,
+                    output_path,
+                    proxy_result["sourceDurationS"],
+                    emit,
+                    dry_run=args.dry_run,
+                    prompt_instructions=prompt_selection.instructions,
+                    prompt_profile_id=prompt_selection.profile_id,
+                    prompt_profile_version=prompt_selection.version,
+                    prompt_source=prompt_selection.source,
+                )
+            except AnalysisStageError as error:
+                diagnostic(f"{error.stage}: {error.message}")
+                emit(error.stage, "error", message=error.message)
+                return 1
         return 0
-    except AnalysisStageError as error:
-        diagnostic(f"{error.stage}: {error.message}")
-        emit(error.stage, "error", message=error.message)
-        return 1
     except PipelineError as error:
         diagnostic(f"{error.stage}: {error.message}")
         emit(error.stage, "error", message=error.message)

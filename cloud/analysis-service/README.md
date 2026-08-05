@@ -300,16 +300,21 @@ bucket policy contains only the operator's bucket administrator and the runtime
 object-user binding. Neither bucket nor service policy contains `allUsers` or
 `allAuthenticatedUsers`.
 
-`gcloud` identity tokens are for development verification only. Production
-desktop authentication remains a later checkpoint.
+`gcloud` identity tokens are now used by the CP4 desktop development client.
+They remain unsuitable as the final packaged-application authentication flow.
 
 ## Checkpoint 3
 
 The worker implementation and cloud operations are documented in
-`CP3-OPERATIONS.md`. The desktop still uses its local Gemini pipeline until the
-client-migration checkpoint.
+`CP3-OPERATIONS.md`.
 
-## Next checkpoint
+## Checkpoint 4
 
-Checkpoint 4 will migrate Electron to the cloud job API, add polling and remote
-error mapping, and remove the desktop requirement for `GEMINI_API_KEY`.
+Electron now creates the CFR proxy locally and uses the cloud job API for signed
+upload, task dispatch, polling, remote error mapping, result loading, and
+cleanup. The desktop no longer reads or passes `GEMINI_API_KEY` and does not
+select the active prompt; both remain server responsibilities.
+
+Development authentication, configuration, tests, manual verification, and the
+remaining installer-grade authentication boundary are documented in
+`CP4-OPERATIONS.md`.

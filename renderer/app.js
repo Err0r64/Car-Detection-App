@@ -302,10 +302,10 @@ let elapsedTimer = null;
 
 const STAGE_LABELS = {
   proxy: 'Creating proxy (1/5)',
-  upload: 'Uploading (2/5)',
-  processing: 'Processing (3/5)',
-  analyzing: 'Analyzing (4/5)',
-  parsing: 'Parsing results (5/5)',
+  upload: 'Uploading to cloud (2/5)',
+  processing: 'Queued in cloud (3/5)',
+  analyzing: 'Cloud analysis (4/5)',
+  parsing: 'Validating cloud results (5/5)',
 };
 
 // --- Landing: project picker ---

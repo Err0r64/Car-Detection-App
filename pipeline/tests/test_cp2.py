@@ -20,6 +20,7 @@ from analyze import (  # noqa: E402
     PipelineError,
     create_proxy,
     load_prompt_selection,
+    main as analyze_main,
     probe_frame_rate,
     proxy_cache_path,
     proxy_stage,
@@ -414,6 +415,44 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertNotEqual(first.name, second.name)
         self.assertTrue(first.name.endswith(".proxy.mp4"))
 
+    def test_proxy_only_mode_does_not_import_gemini_stages(self) -> None:
+        root = Path(__file__).with_name(".cp4-proxy-only")
+        source = root / "source.mp4"
+        output = root / "results.json"
+        proxy = root / "results.proxy.mp4"
+        root.mkdir(exist_ok=True)
+        source.write_bytes(b"source")
+        proxy.write_bytes(b"proxy")
+        proxy_result = {
+            "proxyPath": str(proxy),
+            "sourceDurationS": 15.0,
+        }
+        real_import = __import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "stages":
+                raise AssertionError("proxy-only mode imported Gemini stages")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            with (
+                patch("analyze.proxy_stage", return_value=proxy_result),
+                patch("builtins.__import__", side_effect=guarded_import),
+            ):
+                result = analyze_main([
+                    "--video",
+                    str(source),
+                    "--out",
+                    str(output),
+                    "--proxy-only",
+                ])
+        finally:
+            output.unlink(missing_ok=True)
+            proxy.unlink(missing_ok=True)
+            source.unlink(missing_ok=True)
+            root.rmdir()
+
+        self.assertEqual(result, 0)
     def test_proxy_stage_reuses_a_valid_cached_proxy(self) -> None:
         root = Path(__file__).with_name(".cp2-cache-reuse")
         source = root / "source.mov"

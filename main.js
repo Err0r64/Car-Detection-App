@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { randomUUID } = require('crypto');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
 const {
@@ -11,6 +12,13 @@ const {
   validateProtocolEvent,
 } = require('./analysis-lifecycle');
 const {
+  CloudAnalysisClient,
+  CloudAnalysisError,
+  createGcloudIdentityToken,
+  normalizeAnalysisServiceUrl,
+  runCloudAnalysisJob,
+} = require('./cloud-analysis-client');
+const {
   startClipBatchExport,
   validateClipIntervals,
   writeExportManifest,
@@ -19,12 +27,8 @@ const {
   resolveRuntimePath,
   runtimeRoot,
 } = require('./runtime-paths');
-const { parseConfigJson } = require('./runtime-config');
-const { resolvePythonRuntime } = require('./python-runtime');
-const {
-  normalizeServiceUrl,
-  resolvePromptProfile,
-} = require('./prompt-profile-client');
+const { parseConfigJson, validateAnalysisTimeouts } = require('./runtime-config');
+const { BASIC_RUNTIME_CHECK, resolvePythonRuntime } = require('./python-runtime');
 const {
   cleanProjectName,
   importVideoFile,
@@ -39,13 +43,11 @@ const ANALYSIS_CONFIG_DEFAULTS = {
   ffmpegPath: 'ffmpeg',
   analysisStallTimeoutSeconds: 5 * 60,
   analysisMaxTimeoutSeconds: 45 * 60,
-  promptServiceUrl: 'https://apexiel-prompt-service-316801639479.us-west1.run.app',
-  promptFetchTimeoutSeconds: 5,
+  analysisServiceUrl: 'https://apexiel-analysis-service-316801639479.us-west1.run.app',
+  analysisGcloudPath: process.platform === 'win32' ? 'gcloud.cmd' : 'gcloud',
+  analysisPollIntervalSeconds: 5,
+  analysisRequestTimeoutSeconds: 30,
   useDevStub: false,
-};
-const ANALYSIS_CONFIG_LIMITS = {
-  stallSeconds: 30 * 60,
-  maxSeconds: 2 * 60 * 60,
 };
 
 function readAnalysisConfig() {
@@ -63,7 +65,7 @@ function readAnalysisConfig() {
   }
 
   const config = { ...ANALYSIS_CONFIG_DEFAULTS, ...configured };
-  for (const key of ['pythonPath', 'analyzeScript', 'ffmpegPath']) {
+  for (const key of ['pythonPath', 'analyzeScript', 'ffmpegPath', 'analysisGcloudPath']) {
     if (typeof config[key] !== 'string' || !config[key].trim()) {
       throw new Error('config.json ' + key + ' must be a non-empty string.');
     }
@@ -71,30 +73,9 @@ function readAnalysisConfig() {
   if (typeof config.useDevStub !== 'boolean') {
     throw new Error('config.json useDevStub must be true or false.');
   }
-  config.promptServiceUrl = normalizeServiceUrl(config.promptServiceUrl);
+  config.analysisServiceUrl = normalizeAnalysisServiceUrl(config.analysisServiceUrl);
 
-  const timeoutLimits = {
-    analysisStallTimeoutSeconds: ANALYSIS_CONFIG_LIMITS.stallSeconds,
-    analysisMaxTimeoutSeconds: ANALYSIS_CONFIG_LIMITS.maxSeconds,
-    promptFetchTimeoutSeconds: 30,
-  };
-  for (const [key, maximum] of Object.entries(timeoutLimits)) {
-    if (
-      !Number.isFinite(config[key])
-      || config[key] <= 0
-      || config[key] > maximum
-    ) {
-      throw new Error(
-        'config.json ' + key + ' must be greater than 0 and no more than ' + maximum + '.'
-      );
-    }
-  }
-  if (config.analysisMaxTimeoutSeconds <= config.analysisStallTimeoutSeconds) {
-    throw new Error(
-      'config.json analysisMaxTimeoutSeconds must be greater than analysisStallTimeoutSeconds.'
-    );
-  }
-  return config;
+  return validateAnalysisTimeouts(config);
 }
 
 function runtimePathOptions() {
@@ -437,6 +418,7 @@ ipcMain.handle('load-project', async (event) => {
 // --- Analysis pipeline ---
 
 let analysisChild = null;
+let analysisCloudRun = null;
 let analysisStarting = false;
 let verifiedPythonRuntime = null;
 let analysisResultPath = null;
@@ -530,8 +512,355 @@ function killAnalysis() {
   if (terminateActiveAnalysis) terminateActiveAnalysis('canceled');
 }
 
+async function startCloudAnalysis(event, videoPath, config) {
+  console.info('[cloud-analysis] Cloud mode selected; creating or reusing the local proxy.');
+  const scriptPath = resolveAppPath(config.analyzeScript);
+  if (!fs.existsSync(scriptPath)) {
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `The proxy script could not be found: ${scriptPath}`)
+    );
+    return false;
+  }
+
+  if (
+    !verifiedPythonRuntime
+    || verifiedPythonRuntime.configuredPath !== config.pythonPath
+    || verifiedPythonRuntime.mode !== 'cloud-proxy'
+  ) {
+    const resolution = resolvePythonRuntime(config.pythonPath, {
+      dependencyCheck: BASIC_RUNTIME_CHECK,
+    });
+    if (!resolution.command) {
+      const checked = resolution.attempted.length > 0
+        ? resolution.attempted.join(', ')
+        : config.pythonPath;
+      dialog.showErrorBox(
+        'Analysis dependencies missing',
+        formatAnalysisFailure(
+          'startup',
+          `Could not find Python for proxy generation. Checked: ${checked}`
+        )
+      );
+      return false;
+    }
+    verifiedPythonRuntime = {
+      configuredPath: config.pythonPath,
+      command: resolution.command,
+      mode: 'cloud-proxy',
+    };
+  }
+
+  let runDirectory;
+  try {
+    runDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'capstone-analysis-'));
+  } catch (error) {
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `Could not create a work directory: ${error.message}`)
+    );
+    return false;
+  }
+
+  analysisRunDirectory = runDirectory;
+  const expectedResultPath = path.join(runDirectory, 'results.json');
+  const args = [
+    '-u',
+    scriptPath,
+    '--video',
+    videoPath,
+    '--out',
+    expectedResultPath,
+    '--ffmpeg-path',
+    config.ffmpegPath,
+    '--proxy-cache-dir',
+    path.join(path.dirname(videoPath), '.analysis-cache'),
+    '--proxy-only',
+  ];
+
+  const proxyEnvironment = { ...process.env };
+  delete proxyEnvironment.GEMINI_API_KEY;
+  let child;
+  try {
+    child = spawn(verifiedPythonRuntime.command, args, {
+      cwd: appResourceRoot(),
+      detached: process.platform !== 'win32',
+      env: proxyEnvironment,
+      windowsHide: true,
+    });
+  } catch (error) {
+    cleanupAnalysisRunDirectory(runDirectory);
+    dialog.showErrorBox(
+      'Analysis failed to start',
+      formatAnalysisFailure('startup', `Could not launch Python: ${error.message}`)
+    );
+    return false;
+  }
+
+  const sender = event.sender;
+  const run = {
+    child,
+    controller: new AbortController(),
+    finished: false,
+    canceled: false,
+    watchdog: null,
+  };
+  analysisChild = child;
+  analysisCloudRun = run;
+  analysisResultPath = null;
+
+  let stdoutBuffer = '';
+  let stderrBuffer = '';
+  let lastStderr = '';
+  let proxyResult = null;
+  let pendingFailure = null;
+  let terminateRun = null;
+
+  const sendEvent = (protocolEvent) => {
+    if (!sender.isDestroyed()) sender.send('analysis-event', protocolEvent);
+  };
+
+  const finish = (terminalEvent, options = {}) => {
+    if (run.finished) return;
+    run.finished = true;
+    if (run.watchdog) {
+      run.watchdog.stop();
+      run.watchdog = null;
+    }
+    if (analysisChild === child) analysisChild = null;
+    if (analysisCloudRun === run) analysisCloudRun = null;
+    if (terminateActiveAnalysis === terminateRun) terminateActiveAnalysis = null;
+    sendEvent(terminalEvent);
+    if (options.errorTitle) dialog.showErrorBox(options.errorTitle, terminalEvent.message);
+    if (terminalEvent.event !== 'done') cleanupAnalysisRunDirectory(runDirectory);
+  };
+
+  const fail = (stage, message, title = 'Analysis failed') => {
+    finish(
+      {
+        event: 'error',
+        stage,
+        message: formatAnalysisFailure(stage, message, lastStderr),
+      },
+      { errorTitle: title }
+    );
+  };
+
+  terminateRun = (reason = 'canceled') => {
+    if (run.finished) return;
+    console.info(`[cloud-analysis] Analysis ${reason}.`);
+    run.canceled = reason === 'canceled';
+    run.controller.abort();
+    if (analysisChild === child) terminateProcessTree(child);
+    if (run.canceled) finish({ event: 'canceled' });
+  };
+  terminateActiveAnalysis = terminateRun;
+
+  const queueFailure = (stage, message, title = 'Analysis failed') => {
+    if (pendingFailure || run.finished) return;
+    pendingFailure = { stage, message, title };
+    if (analysisChild === child) terminateProcessTree(child);
+  };
+
+  const processProtocolLine = (line) => {
+    if (!line.trim() || run.finished || pendingFailure) return;
+    let protocolEvent;
+    try {
+      protocolEvent = JSON.parse(line);
+    } catch {
+      queueFailure('proxy', 'Proxy generation emitted malformed progress output.');
+      return;
+    }
+    const validationError = validateProtocolEvent(protocolEvent);
+    if (validationError) {
+      queueFailure('proxy', `Invalid proxy progress event: ${validationError}.`);
+      return;
+    }
+    if (run.watchdog) run.watchdog.touch();
+    if (protocolEvent.event === 'error') {
+      queueFailure(protocolEvent.stage, protocolEvent.message || 'Proxy generation failed.');
+      return;
+    }
+    if (protocolEvent.stage !== 'proxy') {
+      queueFailure('proxy', 'Proxy-only mode emitted an unexpected analysis stage.');
+      return;
+    }
+    if (protocolEvent.event === 'complete') {
+      if (
+        typeof protocolEvent.proxyPath !== 'string'
+        || !fs.existsSync(protocolEvent.proxyPath)
+        || !Number.isFinite(protocolEvent.sourceDurationS)
+        || protocolEvent.sourceDurationS <= 0
+      ) {
+        queueFailure('proxy', 'Proxy generation returned invalid output metadata.');
+        return;
+      }
+      proxyResult = {
+        path: protocolEvent.proxyPath,
+        sourceDurationS: protocolEvent.sourceDurationS,
+      };
+    }
+    sendEvent(protocolEvent);
+  };
+
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdoutBuffer += chunk;
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop();
+    for (const line of lines) processProtocolLine(line);
+  });
+
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => {
+    stderrBuffer += chunk;
+    const lines = stderrBuffer.split(/\r?\n/);
+    stderrBuffer = lines.pop();
+    for (const line of lines) {
+      const diagnostic = line.trim();
+      if (diagnostic) {
+        lastStderr = diagnostic;
+        if (run.watchdog) run.watchdog.touch();
+      }
+    }
+  });
+
+  child.on('error', (error) => {
+    queueFailure('startup', `Could not launch Python: ${error.message}`, 'Analysis failed to start');
+  });
+
+  const continueInCloud = async () => {
+    try {
+      console.info(`[cloud-analysis] Authenticating to ${config.analysisServiceUrl}.`);
+      const identityToken = await createGcloudIdentityToken({
+        gcloudPath: config.analysisGcloudPath,
+        signal: run.controller.signal,
+        timeoutMs: config.analysisRequestTimeoutSeconds * 1000,
+      });
+      if (run.finished) return;
+      console.info('[cloud-analysis] Authentication succeeded with a short-lived identity token.');
+      const client = new CloudAnalysisClient({
+        serviceUrl: config.analysisServiceUrl,
+        identityToken,
+        requestTimeoutMs: config.analysisRequestTimeoutSeconds * 1000,
+      });
+      const outcome = await runCloudAnalysisJob({
+        client,
+        jobId: randomUUID(),
+        proxyPath: proxyResult.path,
+        sourceDurationS: proxyResult.sourceDurationS,
+        pollIntervalMs: config.analysisPollIntervalSeconds * 1000,
+        signal: run.controller.signal,
+        onActivity: () => {
+          if (run.watchdog) run.watchdog.touch();
+        },
+        onEvent: (protocolEvent) => {
+          if (run.finished) return;
+          if (protocolEvent.event === 'start') {
+            const messages = {
+              upload: 'Uploading the proxy to Cloud Storage.',
+              processing: 'Cloud job queued; waiting for a worker.',
+              analyzing: 'Cloud Run worker is analyzing with Gemini.',
+              parsing: 'Cloud results received; validating detections.',
+            };
+            if (messages[protocolEvent.stage]) {
+              console.info(`[cloud-analysis] ${messages[protocolEvent.stage]}`);
+            }
+          } else if (protocolEvent.event === 'retry') {
+            console.info(
+              `[cloud-analysis] Remote analysis retry ${protocolEvent.attempt}/${protocolEvent.maxAttempts}.`
+            );
+          }
+          sendEvent(protocolEvent);
+        },
+      });
+      if (run.finished) return;
+      const detectionCount = outcome.results.detections.length;
+      const model = outcome.analysis && outcome.analysis.model
+        ? outcome.analysis.model
+        : 'unknown model';
+      const prompt = outcome.analysis && outcome.analysis.prompt;
+      const promptLabel = prompt
+        ? `${prompt.profileId} v${prompt.version}`
+        : 'unknown prompt profile';
+      console.info(
+        `[cloud-analysis] Remote job completed: ${detectionCount} detections, ${model}, ${promptLabel}.`
+      );
+      console.info('[cloud-analysis] Remote job and proxy cleanup requested.');
+      const validationError = validateAnalysisResults(outcome.results);
+      if (validationError) throw new CloudAnalysisError('parsing', validationError, {
+        code: 'invalid_results',
+      });
+      const partialPath = `${expectedResultPath}.partial`;
+      fs.writeFileSync(partialPath, `${JSON.stringify(outcome.results, null, 2)}\n`, 'utf8');
+      fs.renameSync(partialPath, expectedResultPath);
+      analysisResultPath = expectedResultPath;
+      finish({
+        event: 'done',
+        stage: 'parsing',
+        resultsPath: expectedResultPath,
+        cloud: true,
+      });
+    } catch (error) {
+      if (run.finished || run.canceled) return;
+      const stage = error instanceof CloudAnalysisError ? error.stage : 'analysis';
+      const message = error instanceof Error ? error.message : 'Cloud analysis failed.';
+      console.error(`[cloud-analysis] ${stage} failed: ${message}`);
+      fail(stage, message);
+    }
+  };
+
+  child.on('close', (code) => {
+    if (stderrBuffer.trim()) lastStderr = stderrBuffer.trim();
+    if (stdoutBuffer.trim() && !run.finished && !pendingFailure) {
+      processProtocolLine(stdoutBuffer);
+    }
+    if (analysisChild === child) analysisChild = null;
+    if (run.finished) return;
+    if (pendingFailure) {
+      fail(pendingFailure.stage, pendingFailure.message, pendingFailure.title);
+      return;
+    }
+    if (code !== 0) {
+      fail('proxy', `Proxy generation exited with code ${code}.`);
+      return;
+    }
+    if (!proxyResult) {
+      fail('proxy', 'Proxy generation exited without reporting a proxy file.');
+      return;
+    }
+    lastStderr = '';
+    console.info(
+      `[cloud-analysis] Local proxy ready (${proxyResult.sourceDurationS.toFixed(2)}s); starting remote requests.`
+    );
+    void continueInCloud();
+  });
+
+  run.watchdog = createAnalysisWatchdog({
+    stallMs: config.analysisStallTimeoutSeconds * 1000,
+    maxMs: config.analysisMaxTimeoutSeconds * 1000,
+    onStall: () => {
+      if (run.finished) return;
+      terminateRun('timeout');
+      fail(
+        'analysis',
+        `Analysis stopped reporting activity for ${config.analysisStallTimeoutSeconds} seconds.`
+      );
+    },
+    onMax: () => {
+      if (run.finished) return;
+      terminateRun('timeout');
+      fail(
+        'analysis',
+        `Analysis exceeded the maximum run time of ${config.analysisMaxTimeoutSeconds} seconds.`
+      );
+    },
+  });
+  run.watchdog.start();
+  return true;
+}
 async function startAnalysis(event, videoPath) {
-  if (analysisChild || activeExport) return false;
+  if (analysisChild || analysisCloudRun || activeExport) return false;
 
   if (analysisRunDirectory && !discardAnalysisResults()) {
     dialog.showErrorBox(
@@ -560,100 +889,19 @@ async function startAnalysis(event, videoPath) {
     return false;
   }
 
-  if (!config.useDevStub && !process.env.GEMINI_API_KEY) {
-    dialog.showErrorBox(
-      'Gemini API key missing',
-      formatAnalysisFailure(
-        'startup',
-        'Set GEMINI_API_KEY in the environment before starting the application.'
-      )
-    );
-    return false;
+  if (!config.useDevStub) {
+    return startCloudAnalysis(event, videoPath, config);
   }
 
-  let scriptPath;
-  if (config.useDevStub) {
-    scriptPath = path.join(appResourceRoot(), 'stub', 'fake_analysis.py');
-  } else {
-    scriptPath = resolveAppPath(config.analyzeScript);
-  }
+  const scriptPath = path.join(appResourceRoot(), 'stub', 'fake_analysis.py');
   if (!fs.existsSync(scriptPath)) {
     dialog.showErrorBox(
       'Analysis failed to start',
-      formatAnalysisFailure('startup', `The analysis script could not be found: ${scriptPath}`)
+      formatAnalysisFailure('startup', `The development stub could not be found: ${scriptPath}`)
     );
     return false;
   }
-
-  let pythonCommand = config.pythonPath;
-  if (!config.useDevStub) {
-    if (
-      !verifiedPythonRuntime
-      || verifiedPythonRuntime.configuredPath !== config.pythonPath
-    ) {
-      const resolution = resolvePythonRuntime(config.pythonPath);
-      if (!resolution.command) {
-        const checked = resolution.attempted.length > 0
-          ? resolution.attempted.join(', ')
-          : config.pythonPath;
-        const installTarget = resolution.attempted[0] || config.pythonPath;
-        const requirementsPath = path.join(
-          appResourceRoot(),
-          'pipeline',
-          'requirements.txt'
-        );
-        const newline = String.fromCharCode(10);
-        dialog.showErrorBox(
-          'Analysis dependencies missing',
-          formatAnalysisFailure(
-            'startup',
-            'Could not find a Python installation containing google-genai and jsonschema.'
-              + newline + 'Checked: ' + checked
-              + newline + 'Install the pipeline packages with: "'
-              + installTarget
-              + '" -m pip install -r "'
-              + requirementsPath
-              + '"'
-          )
-        );        return false;
-      }
-      verifiedPythonRuntime = {
-        configuredPath: config.pythonPath,
-        command: resolution.command,
-      };
-    }
-    pythonCommand = verifiedPythonRuntime.command;
-  }
-
-  let promptSelection = {
-    source: 'built-in',
-    envelope: null,
-    reason: 'Development stub does not call Gemini.',
-  };
-  if (!config.useDevStub) {
-    try {
-      promptSelection = await resolvePromptProfile({
-        serviceUrl: config.promptServiceUrl,
-        cachePath: path.join(app.getPath('userData'), 'prompt-profile-cache.json'),
-        clientVersion: app.getVersion(),
-        timeoutMs: config.promptFetchTimeoutSeconds * 1000,
-      });
-    } catch (error) {
-      promptSelection = {
-        source: 'built-in',
-        envelope: null,
-        reason: `Prompt selection failed; using built-in prompt. ${error.message}`,
-      };
-    }
-  }
-  const selectedProfile = promptSelection.envelope && promptSelection.envelope.profile;
-  const promptLabel = selectedProfile
-    ? `${selectedProfile.profileId} v${selectedProfile.version}`
-    : 'built-in';
-  console.info(`[prompt-profile] Using ${promptLabel} (${promptSelection.source}).`);
-  console.info(`[prompt-profile] ${promptSelection.reason}`);
-  if (promptSelection.warning) console.warn(`[prompt-profile] ${promptSelection.warning}`);
-
+  const pythonCommand = config.pythonPath;
   let runDirectory;
   try {
     runDirectory = fs.mkdtempSync(path.join(app.getPath('temp'), 'capstone-analysis-'));
@@ -667,62 +915,19 @@ async function startAnalysis(event, videoPath) {
 
   analysisRunDirectory = runDirectory;
   const expectedResultPath = path.join(runDirectory, 'results.json');
-  let promptProfilePath = null;
-  if (promptSelection.envelope) {
-    promptProfilePath = path.join(runDirectory, 'prompt-profile.json');
-    try {
-      fs.writeFileSync(
-        promptProfilePath,
-        JSON.stringify(promptSelection.envelope, null, 2) + '\n',
-        'utf8'
-      );
-    } catch (error) {
-      cleanupAnalysisRunDirectory(runDirectory);
-      dialog.showErrorBox(
-        'Analysis failed to start',
-        formatAnalysisFailure(
-          'startup',
-          `Could not prepare the selected prompt profile: ${error.message}`
-        )
-      );
-      return false;
-    }
-  }
-  const args = config.useDevStub
-    ? [
-      '-u',
-      scriptPath,
-      videoPath,
-      '--out',
-      expectedResultPath,
-      ...(process.env.FAKE_ANALYSIS_FAIL ? ['--fail'] : []),
-      ...(process.env.FAKE_ANALYSIS_MALFORMED ? ['--malformed'] : []),
-    ]
-    : [
-      '-u',
-      scriptPath,
-      '--video',
-      videoPath,
-      '--out',
-      expectedResultPath,
-      '--ffmpeg-path',
-      config.ffmpegPath,
-      '--proxy-cache-dir',
-      path.join(path.dirname(videoPath), '.analysis-cache'),
-      '--prompt-source',
-      promptSelection.source,
-      ...(promptProfilePath ? ['--prompt-profile', promptProfilePath] : []),
-    ];
-
+  const args = [
+    '-u',
+    scriptPath,
+    videoPath,
+    '--out',
+    expectedResultPath,
+    ...(process.env.FAKE_ANALYSIS_FAIL ? ['--fail'] : []),
+    ...(process.env.FAKE_ANALYSIS_MALFORMED ? ['--malformed'] : []),
+  ];
   const sender = event.sender;
   const childEnvironment = { ...process.env };
-  if (!config.useDevStub) {
-    childEnvironment.GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    childEnvironment.CAPSTONE_GEMINI_RATE_STATE = path.join(
-      app.getPath('userData'),
-      'gemini-rate-limit.json'
-    );
-  }
+  delete childEnvironment.GEMINI_API_KEY;
+
 
   let child;
   try {
@@ -818,9 +1023,7 @@ async function startAnalysis(event, videoPath) {
         queueFailure('parsing', 'Analysis returned an invalid results path.');
         return;
       }
-      pendingDoneEvent = config.useDevStub
-        ? { ...protocolEvent, devStub: true }
-        : protocolEvent;
+      pendingDoneEvent = { ...protocolEvent, devStub: true };
       return;
     }
     if (protocolEvent.event === 'error') {
@@ -945,7 +1148,7 @@ async function startAnalysis(event, videoPath) {
 }
 
 ipcMain.handle('start-analysis', async (event, videoPath) => {
-  if (analysisStarting || analysisChild || activeExport) return false;
+  if (analysisStarting || analysisChild || analysisCloudRun || activeExport) return false;
   analysisStarting = true;
   try {
     return await startAnalysis(event, videoPath);
@@ -959,7 +1162,7 @@ ipcMain.on('cancel-analysis', () => killAnalysis());
 // --- Clip export ---
 
 ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
-  if (analysisStarting || analysisChild || activeExport) return null;
+  if (analysisStarting || analysisChild || analysisCloudRun || activeExport) return null;
   const win = BrowserWindow.fromWebContents(event.sender);
   const options = {
     title: 'Choose Export Folder',
@@ -978,7 +1181,7 @@ ipcMain.handle('choose-export-folder', async (event, suggestedPath) => {
 });
 
 ipcMain.handle('export-clips', async (event, request) => {
-  if (analysisStarting || analysisChild || activeExport) {
+  if (analysisStarting || analysisChild || analysisCloudRun || activeExport) {
     return { ok: false, error: 'Another analysis or export is already running.' };
   }
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
@@ -1076,7 +1279,7 @@ ipcMain.handle('open-export-folder', async (_event, folderPath) => {
 app.on('before-quit', () => {
   killAnalysis();
   killExport();
-  if (!analysisChild) discardAnalysisResults();
+  if (!analysisChild && !analysisCloudRun) discardAnalysisResults();
 });
 // --- Window ---
 

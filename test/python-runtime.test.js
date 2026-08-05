@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 
 const {
+  BASIC_RUNTIME_CHECK,
   DEPENDENCY_CHECK,
   pythonPathsFromOutput,
   resolvePythonRuntime,
@@ -83,6 +84,18 @@ test('falls back to an installed Python that has pipeline dependencies', () => {
   assert.equal(calls.some(([command]) => command === storePython), false);
 });
 
+test('cloud proxy mode only requires a working Python interpreter', () => {
+  const result = resolvePythonRuntime('python', {
+    platform: 'linux',
+    dependencyCheck: BASIC_RUNTIME_CHECK,
+    runProcess: (_command, args) => {
+      assert.equal(args[1], BASIC_RUNTIME_CHECK);
+      return { status: 0, stdout: '/usr/bin/python3\n' };
+    },
+  });
+
+  assert.equal(result.command, '/usr/bin/python3');
+});
 test('does not override an explicitly configured absolute interpreter', () => {
   const calls = [];
   const result = resolvePythonRuntime(python39, {

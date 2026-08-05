@@ -4,7 +4,9 @@
   "ffmpegPath": "ffmpeg",
   "analysisStallTimeoutSeconds": 300,
   "analysisMaxTimeoutSeconds": 2700,
-  "promptServiceUrl": "https://apexiel-prompt-service-316801639479.us-west1.run.app",
-  "promptFetchTimeoutSeconds": 5,
+  "analysisServiceUrl": "https://apexiel-analysis-service-316801639479.us-west1.run.app",
+  "analysisGcloudPath": "gcloud.cmd",
+  "analysisPollIntervalSeconds": 5,
+  "analysisRequestTimeoutSeconds": 30,
   "useDevStub": false
 }

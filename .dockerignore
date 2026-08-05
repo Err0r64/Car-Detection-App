@@ -1,0 +1,11 @@
+*
+!detections.schema.json
+!cloud/
+!cloud/analysis-service/
+!cloud/analysis-service/requirements.txt
+!cloud/analysis-service/analysis_service/
+!cloud/analysis-service/analysis_service/**
+!pipeline/
+!pipeline/stages.py
+!pipeline/gemini_harness/
+!pipeline/gemini_harness/**

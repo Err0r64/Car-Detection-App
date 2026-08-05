@@ -1,6 +1,8 @@
 appId: com.apexiel.capstonevideoeditor
 productName: Capstone Video Editor
 asar: true
+artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+compression: normal
 
 directories:
   output: dist
@@ -10,6 +12,7 @@ files:
   - preload.js
   - analysis-lifecycle.js
   - clip-export.js
+  - cloud-analysis-client.js
   - runtime-config.js
   - runtime-paths.js
   - project-workspace.js
@@ -36,3 +39,18 @@ extraResources:
 
 win:
   executableName: Capstone Video Editor
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Capstone Video Editor
+  uninstallDisplayName: Capstone Video Editor
+  runAfterFinish: true

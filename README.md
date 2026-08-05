@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Installer/packaging CP1 creates a Windows unpacked build with installation-safe resource paths and is awaiting manual confirmation. Cloud Analysis CP4 now routes real desktop detection through the private Cloud Run job API using short-lived development identity tokens; installer-grade interactive authentication remains pending.
+The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Windows packaging now provides both an unpacked diagnostic build and an unsigned NSIS installer for controlled POC testing. Cloud Analysis CP4 now routes real desktop detection through the private Cloud Run job API using short-lived development identity tokens; installer-grade device authentication remains pending.
 
 The following optional work remains intentionally deferred:
 
@@ -51,7 +51,7 @@ npm install
 npm start
 ```
 
-## Windows Packaging (Installer Phase CP1)
+## Windows Packaging (Installer Phase CP1-CP2)
 
 CP1 establishes the package boundary before creating an installer. `electron-builder.yml` places the Electron main and renderer code in `resources\app.asar`, while `config.json`, `detections.schema.json`, `pipeline`, and `stub` are copied to the external `resources` directory so system Python can execute them. Development builds continue resolving those files from the repository. The `runtime-paths.js` boundary selects the correct root in each environment.
 
@@ -106,6 +106,62 @@ $config.useDevStub = $false
   [Text.UTF8Encoding]::new($false)
 )
 ```
+
+### Controlled-tester installer (CP2)
+
+The CP2 artifact is an unsigned, per-user NSIS installer for a controlled proof-of-concept test group. It creates Desktop and Start Menu shortcuts, supports a custom installation directory, and adds a normal Windows uninstall entry. It does not embed Gemini, Google Cloud, or service-account credentials.
+
+Build the installer from the repository root:
+
+```powershell
+npm install
+npm test
+npm run installer:win
+
+$installer = Join-Path $PWD 'dist\installer\Capstone Video Editor-Setup-0.1.0-x64.exe'
+Get-Item -LiteralPath $installer
+Get-FileHash -Algorithm SHA256 -LiteralPath $installer
+```
+
+The build runs from `%LOCALAPPDATA%\CapstoneVideoEditorInstaller` to avoid mapped-drive packaging failures, then copies the installer and its `.sha256.txt` file into `dist\installer`. Share both files with testers through the approved private file-sharing channel. Because the POC installer is not code-signed, Windows SmartScreen may show an unknown-publisher warning; testers should verify the SHA-256 value before selecting **More info > Run anyway**.
+
+Each tester machine currently requires these host tools:
+
+```powershell
+winget install --exact --id Python.Python.3.13
+winget install --exact --id Gyan.FFmpeg
+winget install --exact --id Google.CloudSDK
+```
+
+Restart Windows after installation so desktop applications receive the updated `PATH`. A project administrator must grant the tester account only Cloud Run invocation access:
+
+```powershell
+gcloud run services add-iam-policy-binding apexiel-analysis-service `
+  --project project-53ab0446-caac-4099-97d `
+  --region us-west1 `
+  --member "user:TESTER_EMAIL" `
+  --role roles/run.invoker
+```
+
+The administrator runs that command once per tester. The tester then runs:
+
+```powershell
+gcloud auth login
+gcloud config set project project-53ab0446-caac-4099-97d
+gcloud auth print-identity-token | Out-Null
+```
+
+After installing the application, verify the complete tester workflow:
+
+1. Launch **Capstone Video Editor** from the Start Menu and confirm the project-selection screen appears.
+2. Create a project, import an MP4 or MOV file, and confirm the imported copy opens with an empty timeline.
+3. Select **Detect Vehicles** and confirm the status advances through proxy creation, upload, processing, analysis, and parsing.
+4. Save the detections, return to Projects, reopen the project, and confirm the intervals persist.
+5. Export at least one interval and confirm the MP4 clip and `export_manifest.json` are created.
+6. Close the app and uninstall it from **Settings > Apps > Installed apps**. Confirm project folders remain on disk.
+
+This installer is suitable for allowlisted POC testers only. Before public distribution, replace the `gcloud` dependency with device authentication and code-sign the installer.
+
 ## Application Flow
 
 1. On the project selection screen, use **Change** to choose the persistent Project location if needed. Select **+**, enter a project name, or open an existing project tile.

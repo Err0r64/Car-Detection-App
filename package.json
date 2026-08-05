@@ -2,11 +2,13 @@
   "name": "capstone-video-editor",
   "version": "0.1.0",
   "description": "Apexiel capstone — desktop review-and-cut editor for AI-assisted motorsports video indexing",
+  "author": "Apexiel Capstone Team",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "test": "node --test --test-isolation=none",
-    "pack:win": "node scripts/pack-win.js"
+    "pack:win": "node scripts/pack-win.js",
+    "installer:win": "node scripts/installer-win.js"
   },
   "devDependencies": {
     "electron": "^37.2.0",

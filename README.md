@@ -26,10 +26,13 @@ The private Cloud Run analysis service is located in
 `cloud/analysis-service`. CP1 established authenticated invocation, CP2 added
 private proxy storage and persistent job records, and CP3 added Cloud Tasks,
 integrity verification, remote prompt loading, Secret Manager-backed Gemini,
-bounded retries, and terminal results. CP4 migrates real Electron analysis to
-this API: the desktop creates the CFR proxy locally, uploads it through a signed
-URL, polls the private job, validates results, and deletes completed cloud data.
-The desktop no longer requires or receives `GEMINI_API_KEY`.
+bounded retries, cancellation guardrails, and terminal results. CP4 migrates
+real Electron analysis to this API: the desktop creates the CFR proxy locally,
+uploads it through a signed URL, polls the private job, validates results, and
+deletes completed cloud data. Processing cancellations are durable, late worker
+results cannot revive canceled jobs, and cloud workers make one bounded Gemini
+call per Cloud Tasks attempt. The desktop no longer requires or receives
+`GEMINI_API_KEY`.
 
 Development runs authenticate with the signed-in Google Cloud CLI identity. This
 is not the final installer-grade user authentication design. See
@@ -133,7 +136,7 @@ winget install --exact --id Gyan.FFmpeg
 winget install --exact --id Google.CloudSDK
 ```
 
-Restart Windows after installation so desktop applications receive the updated `PATH`. A project administrator must grant the tester account only Cloud Run invocation access:
+Close and reopen the application after installing prerequisites. On Windows, the app refreshes the current machine and user `PATH` values at startup. A project administrator must grant the tester account only Cloud Run invocation access:
 
 ```powershell
 gcloud run services add-iam-policy-binding apexiel-analysis-service `
@@ -440,7 +443,7 @@ The Gemini request samples the 2 FPS proxy at the same 2 FPS cadence, uses seed 
 
 Bounds are clamped to the source duration. Intervals that collapse to zero length only because they lie outside the source are omitted, while model-provided zero-length or reversed intervals remain parsing errors. MM:SS strings are accepted at the model boundary; when both bounds exceed the clip duration, a valid concatenated MMSS pair such as `115-137` is narrowly recovered as `75-97` before validation. Rich response fields map directly to the application: `is_target_vehicle` becomes `subject`, `vehicle_description` becomes `notes`, and `detection_confidence` is retained.
 
-Gemini calls are limited to five requests per rolling minute by default and are spaced at least 12 seconds apart. Request history is shared across Electron analysis subprocesses through `gemini-rate-limit.json` in the application user-data directory. Transient `429`, `500`, `502`, `503`, and `504` responses are retried up to five total attempts using server-provided delays or exponential backoff with jitter. The analyzing status reports rate-limit and retry waits. Set `HARNESS_RPM`, `GEMINI_MIN_REQUEST_INTERVAL_S`, or `GEMINI_MAX_ATTEMPTS` before starting Electron to tune these safeguards.
+The direct local Gemini harness limits calls to five requests per rolling minute by default, spaces them at least 12 seconds apart, and retries transient `429`, `500`, `502`, `503`, and `504` responses up to five total attempts. Request history is shared through `gemini-rate-limit.json` in the application user-data directory. Set `HARNESS_RPM`, `GEMINI_MIN_REQUEST_INTERVAL_S`, or `GEMINI_MAX_ATTEMPTS` before starting a direct local run to tune those safeguards. Cloud analysis instead makes one provider attempt per durable Cloud Tasks delivery, allows at most three task attempts, and gives each Gemini HTTP request a five-minute deadline. This prevents nested retries from multiplying one failed job into as many as 15 provider calls.
 
 Stdout is reserved for flushed JSONL protocol events across `proxy`, `upload`, `processing`, `analyzing`, and `parsing`; diagnostics are written only to stderr. `GEMINI_API_KEY` is read only from the environment. Use `--dry-run` to exercise every stage with a canned model response and no key, network request, or API cost.
 

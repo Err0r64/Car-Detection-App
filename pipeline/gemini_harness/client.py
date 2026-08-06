@@ -147,12 +147,32 @@ class GeminiClient:
         dry_run: bool = False,
         observer: Observer | None = None,
         rate_limit_path: Path | None = None,
+        max_request_attempts: int | None = None,
+        request_timeout_ms: int | None = None,
     ) -> None:
         self.model = model
         self.raw_dir = raw_dir
         self.dry_run = dry_run
         self.observer = observer or (lambda _event, _payload: None)
         self.rate_limit_path = rate_limit_path or config.rate_limit_path()
+        self.max_request_attempts = (
+            config.MAX_REQUEST_ATTEMPTS
+            if max_request_attempts is None
+            else max_request_attempts
+        )
+        if (
+            not isinstance(self.max_request_attempts, int)
+            or isinstance(self.max_request_attempts, bool)
+            or not 1 <= self.max_request_attempts <= 10
+        ):
+            raise ValueError("max_request_attempts must be between 1 and 10")
+        if request_timeout_ms is not None and (
+            not isinstance(request_timeout_ms, int)
+            or isinstance(request_timeout_ms, bool)
+            or not 1_000 <= request_timeout_ms <= 30 * 60 * 1_000
+        ):
+            raise ValueError("request_timeout_ms must be between 1000 and 1800000")
+        self.request_timeout_ms = request_timeout_ms
         self._client = None
         self._uploaded_file = None
 
@@ -163,11 +183,20 @@ class GeminiClient:
             raise RuntimeError("GEMINI_API_KEY is not set")
         try:
             from google import genai
+            from google.genai import types
         except ImportError as error:
             raise RuntimeError(
                 "google-genai is not installed; run: python -m pip install -r pipeline/requirements.txt"
             ) from error
-        self._client = genai.Client(api_key=key)
+        http_options = (
+            types.HttpOptions(
+                timeout=self.request_timeout_ms,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            )
+            if self.request_timeout_ms is not None
+            else None
+        )
+        self._client = genai.Client(api_key=key, http_options=http_options)
 
     def upload(self, video_path: Path) -> object:
         if self.dry_run:
@@ -244,6 +273,7 @@ class GeminiClient:
             response_mime_type="application/json",
             response_json_schema=RESPONSE_JSON_SCHEMA,
             http_options=types.HttpOptions(
+                timeout=self.request_timeout_ms,
                 retry_options=types.HttpRetryOptions(attempts=1),
             ),
         )
@@ -274,12 +304,12 @@ class GeminiClient:
         from google.genai import errors
 
         last_error: Exception | None = None
-        for attempt in range(config.MAX_REQUEST_ATTEMPTS):
+        for attempt in range(self.max_request_attempts):
             self._throttle()
             if attempt > 0:
                 self.observer(
                     "retry_start",
-                    {"attempt": attempt + 1, "maxAttempts": config.MAX_REQUEST_ATTEMPTS},
+                    {"attempt": attempt + 1, "maxAttempts": self.max_request_attempts},
                 )
             try:
                 response = self._client.models.generate_content(
@@ -305,7 +335,7 @@ class GeminiClient:
                 last_error = error
                 if (
                     status_code not in config.RETRYABLE_STATUS_CODES
-                    or attempt + 1 >= config.MAX_REQUEST_ATTEMPTS
+                    or attempt + 1 >= self.max_request_attempts
                 ):
                     raise
 
@@ -317,13 +347,13 @@ class GeminiClient:
                         "statusCode": status_code,
                         "delayS": round(delay, 3),
                         "attempt": next_attempt,
-                        "maxAttempts": config.MAX_REQUEST_ATTEMPTS,
+                        "maxAttempts": self.max_request_attempts,
                     },
                 )
                 reason = self._retry_reason(status_code)
                 print(
                     f"{reason}; retrying in {delay:.1f}s "
-                    f"(attempt {next_attempt}/{config.MAX_REQUEST_ATTEMPTS})",
+                    f"(attempt {next_attempt}/{self.max_request_attempts})",
                     file=sys.stderr,
                 )
                 time.sleep(delay)

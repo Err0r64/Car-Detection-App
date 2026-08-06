@@ -14,6 +14,7 @@ files:
   - clip-export.js
   - cloud-analysis-client.js
   - runtime-config.js
+  - runtime-environment.js
   - runtime-paths.js
   - project-workspace.js
   - prompt-profile-client.js

@@ -145,13 +145,25 @@ test('runs the cloud job contract without sending auth to signed storage', async
     if (options.method === 'DELETE') return new Response(null, { status: 204 });
     pollCount += 1;
     if (pollCount === 1) {
+      return Response.json(job('queued', {
+        analysis: {
+          attempts: 1,
+          retry: {
+            stage: 'analyzing',
+            code: 'provider_unavailable',
+            message: 'Gemini is temporarily unavailable.',
+          },
+        },
+      }));
+    }
+    if (pollCount === 2) {
       return Response.json(job('processing', {
-        analysis: { attempts: 1 },
+        analysis: { attempts: 2, retry: null },
       }));
     }
     return Response.json(job('completed', {
       analysis: {
-        attempts: 1,
+        attempts: 2,
         model: 'gemini-3.6-flash',
         prompt: { profileId: 'motorsports-default', version: 2, etag: 'etag' },
         inputTokens: 100,
@@ -196,8 +208,113 @@ test('runs the cloud job contract without sending auth to signed storage', async
   assert.equal(serviceCalls[0].body.proxySizeBytes, 11);
   assert.equal(serviceCalls[0].body.proxySha256.length, 64);
   assert.ok(events.some((event) => event.stage === 'upload' && event.event === 'complete'));
+  assert.ok(events.some((event) => event.stage === 'analyzing' && event.event === 'retry'));
   assert.ok(events.some((event) => event.stage === 'analyzing' && event.event === 'token'));
   assert.equal(calls.at(-1).options.method, 'DELETE');
+});
+
+test('reports durable cloud retry metadata before completion', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-analysis-retry-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const proxyPath = path.join(directory, 'proxy.mp4');
+  fs.writeFileSync(proxyPath, 'proxy');
+
+  const events = [];
+  const calls = [];
+  const client = {
+    async createJob() {
+      calls.push('create');
+      return { job: {}, upload: {} };
+    },
+    async uploadProxy() {
+      calls.push('upload');
+    },
+    async confirmUpload() {
+      calls.push('confirm');
+      return {
+        state: 'queued',
+        analysis: {
+          attempts: 1,
+          retry: {
+            stage: 'analyzing',
+            code: 'provider_unavailable',
+            message: 'Gemini is temporarily unavailable.',
+          },
+        },
+      };
+    },
+    async getJob() {
+      calls.push('poll');
+      return {
+        state: 'completed',
+        analysis: { attempts: 2, outputTokens: 8 },
+        results: { detections: [] },
+      };
+    },
+    async deleteJob() {
+      calls.push('delete');
+      return true;
+    },
+  };
+
+  await runCloudAnalysisJob({
+    client,
+    jobId: JOB_ID,
+    proxyPath,
+    sourceDurationS: 15,
+    pollIntervalMs: 1,
+    onEvent: (event) => events.push(event),
+  });
+
+  const retry = events.find((event) => event.event === 'retry');
+  assert.deepEqual(retry, {
+    stage: 'analyzing',
+    event: 'retry',
+    attempt: 2,
+    maxAttempts: 3,
+    retryStage: 'analyzing',
+    code: 'provider_unavailable',
+    message: 'Gemini is temporarily unavailable.',
+  });
+  assert.deepEqual(calls, ['create', 'upload', 'confirm', 'poll', 'delete']);
+});
+
+test('maps a remotely canceled job and still requests cleanup', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cloud-analysis-canceled-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const proxyPath = path.join(directory, 'proxy.mp4');
+  fs.writeFileSync(proxyPath, 'proxy');
+
+  const calls = [];
+  const client = {
+    async createJob() {
+      calls.push('create');
+      return { job: {}, upload: {} };
+    },
+    async uploadProxy() {
+      calls.push('upload');
+    },
+    async confirmUpload() {
+      calls.push('confirm');
+      return { state: 'canceled', analysis: { attempts: 1 } };
+    },
+    async deleteJob() {
+      calls.push('delete');
+      return true;
+    },
+  };
+
+  await assert.rejects(
+    runCloudAnalysisJob({
+      client,
+      jobId: JOB_ID,
+      proxyPath,
+      sourceDurationS: 15,
+      pollIntervalMs: 1,
+    }),
+    (error) => error instanceof CloudAnalysisError && error.code === 'canceled'
+  );
+  assert.deepEqual(calls, ['create', 'upload', 'confirm', 'delete']);
 });
 
 test('maps a failed remote job and still deletes it', async () => {

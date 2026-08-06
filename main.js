@@ -4,6 +4,7 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
+const { refreshWindowsPath } = require('./runtime-environment');
 const {
   createAnalysisWatchdog,
   formatAnalysisFailure,
@@ -36,6 +37,10 @@ const {
   resolveProjectDirectory,
   validateProjectName,
 } = require('./project-workspace');
+
+if (refreshWindowsPath()) {
+  console.info('[runtime] Refreshed PATH from the current Windows environment.');
+}
 
 const ANALYSIS_CONFIG_DEFAULTS = {
   pythonPath: process.platform === 'win32' ? 'python' : 'python3',
@@ -767,8 +772,11 @@ async function startCloudAnalysis(event, videoPath, config) {
               console.info(`[cloud-analysis] ${messages[protocolEvent.stage]}`);
             }
           } else if (protocolEvent.event === 'retry') {
+            const reason = protocolEvent.retryStage && protocolEvent.code
+              ? ` (${protocolEvent.retryStage}/${protocolEvent.code})`
+              : '';
             console.info(
-              `[cloud-analysis] Remote analysis retry ${protocolEvent.attempt}/${protocolEvent.maxAttempts}.`
+              `[cloud-analysis] Remote analysis retry ${protocolEvent.attempt}/${protocolEvent.maxAttempts}${reason}.`
             );
           }
           sendEvent(protocolEvent);

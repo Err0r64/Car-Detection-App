@@ -12,6 +12,7 @@ const JOB_STATES = new Set([
   'processing',
   'completed',
   'failed',
+  'canceled',
 ]);
 const MAX_ERROR_TEXT = 500;
 
@@ -270,6 +271,33 @@ function validateJobEnvelope(value, expectedJobId = null) {
     throw new CloudAnalysisError('parsing', 'The analysis service omitted proxy metadata.', {
       code: 'invalid_job_response',
     });
+  }
+  if (job.analysis !== undefined) {
+    const analysis = job.analysis;
+    if (
+      !analysis
+      || typeof analysis !== 'object'
+      || !Number.isInteger(analysis.attempts)
+      || analysis.attempts < 0
+    ) {
+      throw new CloudAnalysisError('parsing', 'The analysis service returned invalid attempt metadata.', {
+        code: 'invalid_job_response',
+      });
+    }
+    if (analysis.retry !== null && analysis.retry !== undefined) {
+      const retry = analysis.retry;
+      if (
+        !retry
+        || typeof retry !== 'object'
+        || typeof retry.stage !== 'string'
+        || typeof retry.code !== 'string'
+        || typeof retry.message !== 'string'
+      ) {
+        throw new CloudAnalysisError('parsing', 'The analysis service returned invalid retry metadata.', {
+          code: 'invalid_job_response',
+        });
+      }
+    }
   }
   if (job.state === 'completed') {
     if (!job.results || !Array.isArray(job.results.detections)) {
@@ -560,11 +588,15 @@ async function runCloudAnalysisJob(options) {
         ? job.analysis.attempts
         : 0;
       if (attempts > lastAttempts && job.state === 'queued') {
+        const retry = job.analysis && job.analysis.retry;
         onEvent({
           stage: 'analyzing',
           event: 'retry',
           attempt: attempts + 1,
           maxAttempts: 3,
+          retryStage: retry ? retry.stage : 'analysis',
+          code: retry ? retry.code : 'remote_retry',
+          message: retry ? retry.message : 'Cloud analysis will retry.',
         });
       }
       lastAttempts = Math.max(lastAttempts, attempts);
@@ -590,6 +622,9 @@ async function runCloudAnalysisJob(options) {
           job.error.message,
           { code: job.error.code || 'remote_analysis_failed' }
         );
+      }
+      if (job.state === 'canceled') {
+        throw abortError('analysis');
       }
       await delay(pollIntervalMs, signal);
       job = await client.getJob(options.jobId, signal);

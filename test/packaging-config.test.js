@@ -16,6 +16,7 @@ test('packaging includes every main-process runtime module', () => {
     'project-workspace.js',
     'python-runtime.js',
     'runtime-config.js',
+    'runtime-environment.js',
     'runtime-paths.js',
   ];
 

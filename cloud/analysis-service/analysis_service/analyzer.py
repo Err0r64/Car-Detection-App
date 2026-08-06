@@ -9,6 +9,9 @@ import tempfile
 from typing import Any, Protocol
 
 
+CLOUD_GEMINI_REQUEST_TIMEOUT_MS = 5 * 60 * 1_000
+
+
 class AnalyzerError(RuntimeError):
     def __init__(self, stage: str, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
@@ -77,7 +80,12 @@ class GeminiAnalyzer:
 
         with tempfile.TemporaryDirectory(prefix="apexiel-gemini-") as raw_directory:
             try:
-                client = GeminiClient(Path(raw_directory))
+                # Cloud Tasks owns durable retries; keep each task to one provider call.
+                client = GeminiClient(
+                    Path(raw_directory),
+                    max_request_attempts=1,
+                    request_timeout_ms=CLOUD_GEMINI_REQUEST_TIMEOUT_MS,
+                )
                 uploaded = client.upload(proxy_path)
                 uploaded = client.wait_until_active(uploaded)
                 config = RunConfig(

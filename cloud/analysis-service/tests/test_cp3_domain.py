@@ -62,6 +62,33 @@ class Cp3DomainTests(unittest.TestCase):
         self.assertEqual(restored, failed)
         self.assertNotIn("results", restored.public_dict())
 
+    def test_retry_details_round_trip_and_clear_on_next_attempt(self) -> None:
+        retrying = processing_job().with_retry_queued(
+            NOW,
+            stage="analyzing",
+            code="provider_unavailable",
+            message="Gemini is temporarily unavailable.",
+        )
+        restored = AnalysisJob.from_record(retrying.record_dict())
+        self.assertEqual(restored, retrying)
+        self.assertEqual(
+            restored.public_dict()["analysis"]["retry"]["code"],
+            "provider_unavailable",
+        )
+
+        processing = restored.with_processing(NOW)
+        self.assertIsNone(processing.public_dict()["analysis"]["retry"])
+
+    def test_canceled_job_is_terminal_and_round_trips(self) -> None:
+        canceled = processing_job().with_canceled(NOW)
+        restored = AnalysisJob.from_record(canceled.record_dict())
+        self.assertEqual(restored, canceled)
+        self.assertEqual(restored.public_dict()["state"], "canceled")
+        self.assertEqual(
+            restored.public_dict()["analysis"]["completedAt"],
+            NOW.isoformat().replace("+00:00", "Z"),
+        )
+
     def test_invalid_detection_cannot_be_persisted(self) -> None:
         with self.assertRaises(JobDomainError):
             processing_job().with_completed(

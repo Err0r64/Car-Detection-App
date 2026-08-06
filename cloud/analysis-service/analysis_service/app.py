@@ -376,7 +376,7 @@ def create_app(
             return {"schemaVersion": API_SCHEMA_VERSION, "status": "discarded"}
         if job.expires_at <= clock():
             return {"schemaVersion": API_SCHEMA_VERSION, "status": "expired"}
-        if job.state in {"completed", "failed"}:
+        if job.state in {"completed", "failed", "canceled"}:
             return {"schemaVersion": API_SCHEMA_VERSION, "job": job.public_dict()}
         if job.state == "processing" and _task_retry_count(request) == 0:
             raise HTTPException(status_code=409, detail="Analysis is already processing.")
@@ -395,9 +395,10 @@ def create_app(
             result = worker.run(job)
             completed_at = clock()
             try:
-                job = store.update(
-                    job.job_id,
-                    lambda current: current.with_completed(
+                def complete_if_active(current):
+                    if current.state == "canceled":
+                        return current
+                    return current.with_completed(
                         detections=result.detections,
                         model=result.model,
                         prompt_profile_id=result.prompt_profile_id,
@@ -406,8 +407,9 @@ def create_app(
                         input_tokens=result.input_tokens,
                         output_tokens=result.output_tokens,
                         updated_at=completed_at,
-                    ),
-                )
+                    )
+
+                job = store.update(job.job_id, complete_if_active)
             except JobDomainError as error:
                 raise WorkerError(
                     "parsing",
@@ -415,54 +417,113 @@ def create_app(
                     "Gemini returned invalid detection results.",
                 ) from error
         except WorkerError as error:
-            current = store.get(job.job_id)
             failed_at = clock()
-            if error.retryable and current.analysis_attempts < MAX_WORKER_ATTEMPTS:
-                store.update(
-                    job.job_id,
-                    lambda active: active.with_retry_queued(failed_at),
-                )
-                raise HTTPException(status_code=503, detail="Analysis will be retried.")
-            job = store.update(
-                job.job_id,
-                lambda current: current.with_failed(
+
+            def record_worker_outcome(current):
+                if current.state == "canceled":
+                    return current
+                if error.retryable and current.analysis_attempts < MAX_WORKER_ATTEMPTS:
+                    return current.with_retry_queued(
+                        failed_at,
+                        stage=error.stage,
+                        code=error.code,
+                        message=error.message,
+                    )
+                return current.with_failed(
                     stage=error.stage,
                     code=error.code,
                     message=error.message,
                     proxy_verified=error.proxy_verified,
                     updated_at=failed_at,
-                ),
-            )
-        except Exception:
-            LOGGER.exception("Unexpected analysis worker failure for job %s", job.job_id)
-            current = store.get(job.job_id)
-            failed_at = clock()
-            if current.analysis_attempts < MAX_WORKER_ATTEMPTS:
-                store.update(
+                )
+
+            job = store.update(job.job_id, record_worker_outcome)
+            if job.state == "canceled":
+                LOGGER.info(
+                    "Analysis job %s acknowledged after cancellation.", job.job_id
+                )
+            elif job.state == "queued":
+                LOGGER.warning(
+                    "Analysis job %s attempt %d/%d will retry: %s/%s",
                     job.job_id,
-                    lambda active: active.with_retry_queued(failed_at),
+                    job.analysis_attempts,
+                    MAX_WORKER_ATTEMPTS,
+                    error.stage,
+                    error.code,
                 )
                 raise HTTPException(status_code=503, detail="Analysis will be retried.")
-            job = store.update(
-                job.job_id,
-                lambda current: current.with_failed(
+        except Exception:
+            LOGGER.exception("Unexpected analysis worker failure for job %s", job.job_id)
+            failed_at = clock()
+
+            def record_unexpected_outcome(current):
+                if current.state == "canceled":
+                    return current
+                if current.analysis_attempts < MAX_WORKER_ATTEMPTS:
+                    return current.with_retry_queued(
+                        failed_at,
+                        stage="internal",
+                        code="worker_internal_error",
+                        message="The analysis worker failed unexpectedly.",
+                    )
+                return current.with_failed(
                     stage="internal",
                     code="worker_internal_error",
                     message="The analysis worker failed unexpectedly.",
                     proxy_verified=False,
                     updated_at=failed_at,
-                ),
-            )
+                )
+
+            job = store.update(job.job_id, record_unexpected_outcome)
+            if job.state == "canceled":
+                LOGGER.info(
+                    "Analysis job %s acknowledged after cancellation.", job.job_id
+                )
+            elif job.state == "queued":
+                LOGGER.warning(
+                    "Analysis job %s attempt %d/%d will retry after an internal error.",
+                    job.job_id,
+                    job.analysis_attempts,
+                    MAX_WORKER_ATTEMPTS,
+                )
+                raise HTTPException(status_code=503, detail="Analysis will be retried.")
         return {"schemaVersion": API_SCHEMA_VERSION, "job": job.public_dict()}
 
-    @service.delete("/v1/analysis/jobs/{job_id}", status_code=204)
+    def delete_proxy(job) -> None:
+        try:
+            stored = uploads.inspect(job.proxy_object)
+            if stored is not None:
+                uploads.delete(job.proxy_object, stored.generation)
+        except Exception:
+            LOGGER.exception(
+                "Could not delete proxy data for analysis job %s.", job.job_id
+            )
+
+    @service.delete("/v1/analysis/jobs/{job_id}")
     def delete_analysis_job(job_id: UUID) -> Response:
         job = store.get(str(job_id))
         if job.state == "processing":
-            raise JobConflictError("A processing analysis job cannot be deleted.")
-        stored = uploads.inspect(job.proxy_object)
-        if stored is not None:
-            uploads.delete(job.proxy_object, stored.generation)
+            canceled_at = clock()
+            job = store.update(
+                job.job_id,
+                lambda current: (
+                    current.with_canceled(canceled_at)
+                    if current.state == "processing"
+                    else current
+                ),
+            )
+            if job.state == "canceled":
+                delete_proxy(job)
+                LOGGER.info("Analysis job %s was canceled.", job.job_id)
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "schemaVersion": API_SCHEMA_VERSION,
+                        "job": job.public_dict(),
+                    },
+                )
+
+        delete_proxy(job)
         store.delete(job.job_id)
         return Response(status_code=204)
 

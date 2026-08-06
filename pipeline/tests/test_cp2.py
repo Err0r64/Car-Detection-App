@@ -161,6 +161,7 @@ class Cp2ParsingTests(unittest.TestCase):
                 dry_run=True,
                 observer=lambda event, payload: events.append((event, payload)),
                 rate_limit_path=rate_limit_path,
+                request_timeout_ms=300_000,
             )
             client.dry_run = False
             client._client = fake_api
@@ -195,6 +196,7 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertEqual(request_config.seed, gemini_config.SEED)
         self.assertIsNone(request_config.temperature)
         self.assertEqual(request_config.http_options.retry_options.attempts, 1)
+        self.assertEqual(request_config.http_options.timeout, 300_000)
         self.assertEqual(request_config.response_mime_type, "application/json")
         self.assertEqual(request_config.response_json_schema["required"], ["appearances"])
         self.assertEqual(events[-1], ("tokens", {"inputTokens": 120, "outputTokens": 45}))
@@ -266,6 +268,52 @@ class Cp2ParsingTests(unittest.TestCase):
         self.assertEqual(events[0][1]["attempt"], 2)
         self.assertIn("retry_start", [event for event, _payload in events])
         self.assertEqual(events[-1][0], "tokens")
+
+    def test_explicit_single_attempt_disables_client_level_retry(self) -> None:
+        from google.genai import errors
+
+        class AlwaysUnavailableModels:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def generate_content(self, **_kwargs: object) -> object:
+                self.calls += 1
+                raise errors.ServerError(
+                    503,
+                    {
+                        "error": {
+                            "code": 503,
+                            "message": "The model is overloaded.",
+                        }
+                    },
+                )
+
+        rate_limit_path = Path(__file__).with_name(".cp2-single-attempt.json")
+        client = GeminiClient(
+            Path(__file__).parent,
+            dry_run=True,
+            rate_limit_path=rate_limit_path,
+            max_request_attempts=1,
+        )
+        client.dry_run = False
+        models = AlwaysUnavailableModels()
+        client._client = type("FakeApi", (), {"models": models})()
+
+        try:
+            with (
+                patch.object(gemini_config, "MIN_REQUEST_INTERVAL_S", 0.0),
+                patch("gemini_harness.client.time.sleep") as sleep,
+            ):
+                with self.assertRaises(errors.ServerError):
+                    client._generate_with_retry([], object())
+        finally:
+            rate_limit_path.unlink(missing_ok=True)
+            rate_limit_path.with_name(
+                f"{rate_limit_path.name}.lock"
+            ).unlink(missing_ok=True)
+
+        self.assertEqual(models.calls, 1)
+        sleep.assert_not_called()
 
     def test_rate_limit_history_is_shared_across_clients(self) -> None:
         rate_limit_path = Path(__file__).with_name(".cp2-shared-limit.json")

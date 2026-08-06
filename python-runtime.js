@@ -90,7 +90,8 @@ function discoverWindowsPythonPaths(runProcess) {
 }
 
 function candidateKey(candidate, platform) {
-  const normalized = path.normalize(candidate);
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  const normalized = pathApi.normalize(candidate);
   return platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
@@ -126,7 +127,8 @@ function resolvePythonRuntime(configuredPath, options = {}) {
   const configuredResult = check(configuredPath.trim());
   if (configuredResult) return { command: configuredResult, attempted };
 
-  if (platform === 'win32' && !path.isAbsolute(configuredPath)) {
+  const pathApi = platform === 'win32' ? path.win32 : path.posix;
+  if (platform === 'win32' && !pathApi.isAbsolute(configuredPath)) {
     for (const candidate of discoverWindowsPythonPaths(runProcess)) {
       const result = check(candidate);
       if (result) return { command: result, attempted };

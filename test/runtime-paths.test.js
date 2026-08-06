@@ -10,8 +10,13 @@ const {
 test('uses the source directory when Electron is not packaged', () => {
   const options = {
     isPackaged: false,
-    resourcesPath: path.join('C:', 'installed', 'resources'),
-    appDirectory: path.join('Z:', 'source'),
+    resourcesPath: path.join(
+      '/Applications',
+      'Capstone Video Editor.app',
+      'Contents',
+      'Resources'
+    ),
+    appDirectory: path.join('/Users', 'developer', 'capstone-video-editor'),
   };
 
   assert.equal(runtimeRoot(options), options.appDirectory);
@@ -24,8 +29,19 @@ test('uses the source directory when Electron is not packaged', () => {
 test('uses the external resources directory in packaged Electron builds', () => {
   const options = {
     isPackaged: true,
-    resourcesPath: path.join('C:', 'installed', 'resources'),
-    appDirectory: path.join('C:', 'installed', 'resources', 'app.asar'),
+    resourcesPath: path.join(
+      '/Applications',
+      'Capstone Video Editor.app',
+      'Contents',
+      'Resources'
+    ),
+    appDirectory: path.join(
+      '/Applications',
+      'Capstone Video Editor.app',
+      'Contents',
+      'Resources',
+      'app.asar'
+    ),
   };
 
   assert.equal(runtimeRoot(options), options.resourcesPath);

@@ -4,7 +4,7 @@ Checkpoint 3 runs Gemini behind the private analysis-service boundary. Upload
 confirmation queues an authenticated Cloud Tasks request. The worker downloads
 the exact Cloud Storage generation while calculating SHA-256, fetches the
 published prompt profile, calls the existing validated Gemini harness, validates
-the normalized detections, and persists `completed` or `failed`.
+the normalized detections, and persists `completed`, `failed`, or `canceled`.
 
 The desktop still uses its local pipeline until the client-migration checkpoint.
 
@@ -35,8 +35,10 @@ $promptServiceUrl = gcloud run services describe apexiel-prompt-service `
 ```
 
 The queue permits one concurrent worker, up to `0.1` dispatches per second, and
-three attempts with bounded backoff. A task request may run for at most 30
-minutes. The Cloud Run service uses the second-generation environment and 2 GiB
+three attempts with bounded backoff. Each task makes one Gemini provider attempt
+with a five-minute SDK request deadline, so a job can make at most three provider
+calls rather than multiplying SDK and task retries. A task request may run for
+at most 30 minutes. The Cloud Run service uses the second-generation environment and 2 GiB
 of memory because the generation-pinned proxy is staged on ephemeral disk before
 the Gemini Files API upload.
 
@@ -201,7 +203,7 @@ do {
     -Headers $apiHeaders
   $status.job.state
 } while (
-  $status.job.state -notin @('completed', 'failed') -and
+  $status.job.state -notin @('completed', 'failed', 'canceled') -and
   (Get-Date) -lt $deadline
 )
 

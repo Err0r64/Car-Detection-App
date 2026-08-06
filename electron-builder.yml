@@ -1,7 +1,6 @@
 appId: com.apexiel.capstonevideoeditor
 productName: Capstone Video Editor
 asar: true
-artifactName: ${productName}-Setup-${version}-${arch}.${ext}
 compression: normal
 
 directories:
@@ -14,10 +13,12 @@ files:
   - clip-export.js
   - cloud-analysis-client.js
   - runtime-config.js
+  - runtime-environment.js
   - runtime-paths.js
   - project-workspace.js
   - prompt-profile-client.js
   - python-runtime.js
+  - runtime-environment.js
   - renderer/**/*
   - package.json
 
@@ -37,6 +38,18 @@ extraResources:
     filter:
       - "**/*.py"
 
+mac:
+  category: public.app-category.video
+  executableName: Capstone Video Editor
+  target:
+    - target: dmg
+  identity: null
+  hardenedRuntime: false
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+  title: ${productName} ${version}
+
 win:
   executableName: Capstone Video Editor
   target:
@@ -45,6 +58,7 @@ win:
         - x64
 
 nsis:
+  artifactName: ${productName}-Setup-${version}-${arch}.${ext}
   oneClick: false
   perMachine: false
   allowElevation: true

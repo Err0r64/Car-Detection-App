@@ -931,11 +931,11 @@ window.editorAPI.onAnalysisEvent((evt) => {
     if (Number.isFinite(tokenCount)) statusTokens.textContent = `${tokenCount} tokens`;
   } else if (evt.event === 'retry') {
     const delay = Number.isFinite(evt.delayS) ? Math.ceil(evt.delayS) : null;
-    statusStage.textContent = evt.statusCode === 429
-      ? 'Gemini rate limited; waiting to retry'
-      : 'Gemini temporarily unavailable; waiting to retry';
+    statusStage.textContent = typeof evt.message === 'string' && evt.message
+      ? evt.message
+      : 'Cloud analysis will retry.';
     statusTokens.textContent = delay === null
-      ? `Attempt ${evt.attempt}/${evt.maxAttempts}`
+      ? `Retry attempt ${evt.attempt}/${evt.maxAttempts}`
       : `Retry in ${delay}s - attempt ${evt.attempt}/${evt.maxAttempts}`;
   } else if (evt.event === 'retry_start') {
     statusStage.textContent = `Analyzing - attempt ${evt.attempt}/${evt.maxAttempts}`;

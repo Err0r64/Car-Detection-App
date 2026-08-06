@@ -9,7 +9,7 @@ adds private proxy storage, persistent job records, 15-minute V4 upload URLs,
 upload metadata validation, cancellation cleanup, and bucket lifecycle rules.
 Checkpoint 3 adds streamed SHA-256 verification, durable Cloud Tasks dispatch,
 the published remote prompt, a Secret Manager-backed Gemini worker, bounded
-retries, and persistent terminal results.
+retries, durable in-flight cancellation, and persistent terminal results.
 
 ## Current API
 
@@ -25,8 +25,9 @@ retries, and persistent terminal results.
 - `POST /v1/internal/analysis/jobs/{jobId}/run` is the OIDC-authenticated Cloud
   Tasks worker route. It publishes `completed` results or a bounded `failed`
   error and is not a desktop endpoint.
-- `DELETE /v1/analysis/jobs/{jobId}` deletes the proxy and job record.
-  Processing jobs return `409` because CP3 does not provide remote cancellation.
+- `DELETE /v1/analysis/jobs/{jobId}` deletes inactive job data immediately.
+  A processing job returns `202`, enters terminal `canceled` state, deletes its
+  proxy, suppresses late results, and acknowledges any later task delivery.
 
 The job identifier is the normalized client request UUID. Repeating an identical
 create request is safe and returns a replacement upload URL when the job still
@@ -61,8 +62,10 @@ awaits upload. Reusing the UUID with different metadata returns `409`.
   reproducibility but never include prompt instructions or raw Gemini output.
 
 The bucket deletes `uploads/` objects after one day and `jobs/` records after
-seven days. Lifecycle execution is asynchronous, so explicit cancellation still
-deletes both immediately. Soft delete is disabled because these are temporary,
+seven days. Canceling an inactive job deletes both immediately. Canceling a
+processing job deletes the proxy immediately but retains the small terminal job
+record so an in-flight or redelivered task cannot revive it; lifecycle cleanup
+removes that record. Soft delete is disabled because these are temporary,
 reproducible objects; deletion cannot be undone.
 
 ## Local verification
@@ -81,7 +84,7 @@ python -m uvicorn analysis_service.app:app --reload --port 8081
 
 Without cloud environment variables, local Uvicorn intentionally reports all
 capability flags as `false`. The automated suite injects in-memory storage,
-task, prompt, and worker adapters and must pass 32 tests. In a second terminal:
+task, prompt, and worker adapters and must pass the full suite. In a second terminal:
 
 ```powershell
 Invoke-RestMethod 'http://127.0.0.1:8081/health'

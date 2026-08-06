@@ -4,6 +4,7 @@ const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { pathToFileURL } = require('url');
 const { spawn } = require('child_process');
+const { refreshWindowsPath } = require('./runtime-environment');
 const {
   createAnalysisWatchdog,
   formatAnalysisFailure,
@@ -29,6 +30,7 @@ const {
 } = require('./runtime-paths');
 const { parseConfigJson, validateAnalysisTimeouts } = require('./runtime-config');
 const { BASIC_RUNTIME_CHECK, resolvePythonRuntime } = require('./python-runtime');
+const { augmentRuntimePath } = require('./runtime-environment');
 const {
   cleanProjectName,
   importVideoFile,
@@ -37,10 +39,15 @@ const {
   validateProjectName,
 } = require('./project-workspace');
 
+if (refreshWindowsPath()) {
+  console.info('[runtime] Refreshed PATH from the current Windows environment.');
+}
+
 const ANALYSIS_CONFIG_DEFAULTS = {
-  pythonPath: process.platform === 'win32' ? 'python' : 'python3',
+  pythonPath: defaultPythonPath(),
   analyzeScript: 'pipeline/analyze.py',
   ffmpegPath: 'ffmpeg',
+  ffprobePath: 'ffprobe',
   analysisStallTimeoutSeconds: 5 * 60,
   analysisMaxTimeoutSeconds: 45 * 60,
   analysisServiceUrl: 'https://apexiel-analysis-service-316801639479.us-west1.run.app',
@@ -65,7 +72,13 @@ function readAnalysisConfig() {
   }
 
   const config = { ...ANALYSIS_CONFIG_DEFAULTS, ...configured };
-  for (const key of ['pythonPath', 'analyzeScript', 'ffmpegPath', 'analysisGcloudPath']) {
+  for (const key of [
+    'pythonPath',
+    'analyzeScript',
+    'ffmpegPath',
+    'ffprobePath',
+    'analysisGcloudPath',
+  ]) {
     if (typeof config[key] !== 'string' || !config[key].trim()) {
       throw new Error('config.json ' + key + ' must be a non-empty string.');
     }
@@ -573,6 +586,8 @@ async function startCloudAnalysis(event, videoPath, config) {
     expectedResultPath,
     '--ffmpeg-path',
     config.ffmpegPath,
+    '--ffprobe-path',
+    config.ffprobePath,
     '--proxy-cache-dir',
     path.join(path.dirname(videoPath), '.analysis-cache'),
     '--proxy-only',
@@ -767,8 +782,11 @@ async function startCloudAnalysis(event, videoPath, config) {
               console.info(`[cloud-analysis] ${messages[protocolEvent.stage]}`);
             }
           } else if (protocolEvent.event === 'retry') {
+            const reason = protocolEvent.retryStage && protocolEvent.code
+              ? ` (${protocolEvent.retryStage}/${protocolEvent.code})`
+              : '';
             console.info(
-              `[cloud-analysis] Remote analysis retry ${protocolEvent.attempt}/${protocolEvent.maxAttempts}.`
+              `[cloud-analysis] Remote analysis retry ${protocolEvent.attempt}/${protocolEvent.maxAttempts}${reason}.`
             );
           }
           sendEvent(protocolEvent);

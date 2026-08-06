@@ -11,7 +11,15 @@ from uuid import UUID
 
 
 VALID_STATES = frozenset(
-    {"awaiting_upload", "uploaded", "queued", "processing", "completed", "failed"}
+    {
+        "awaiting_upload",
+        "uploaded",
+        "queued",
+        "processing",
+        "completed",
+        "failed",
+        "canceled",
+    }
 )
 PROFILE_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 ETAG_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -154,6 +162,9 @@ class AnalysisJob:
     error_stage: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    retry_stage: str | None = None
+    retry_code: str | None = None
+    retry_message: str | None = None
 
     def same_request(
         self,
@@ -223,15 +234,46 @@ class AnalysisJob:
             error_stage=None,
             error_code=None,
             error_message=None,
+            retry_stage=None,
+            retry_code=None,
+            retry_message=None,
         )
 
-    def with_retry_queued(self, updated_at: datetime) -> "AnalysisJob":
+    def with_retry_queued(
+        self, updated_at: datetime, *, stage: str, code: str, message: str
+    ) -> "AnalysisJob":
         if self.state != "processing":
             raise JobDomainError("Only processing jobs can be retried")
+        stage = _clean_error_text(stage, "retry stage", 32)
+        if not ERROR_CODE_PATTERN.fullmatch(code):
+            raise JobDomainError("retry code is invalid")
+        message = _clean_error_text(message, "retry message", 500)
         return replace(
             self,
             state="queued",
             analysis_started_at=None,
+            updated_at=updated_at,
+            retry_stage=stage,
+            retry_code=code,
+            retry_message=message,
+        )
+
+    def with_canceled(self, updated_at: datetime) -> "AnalysisJob":
+        if self.state == "canceled":
+            return self
+        if self.state != "processing":
+            raise JobDomainError("Only processing jobs can be canceled")
+        return replace(
+            self,
+            state="canceled",
+            analysis_completed_at=updated_at,
+            detections=None,
+            error_stage=None,
+            error_code=None,
+            error_message=None,
+            retry_stage=None,
+            retry_code=None,
+            retry_message=None,
             updated_at=updated_at,
         )
 
@@ -275,6 +317,9 @@ class AnalysisJob:
             output_tokens=_nonnegative_integer(output_tokens, "outputTokens"),
             detections=cleaned_detections,
             updated_at=updated_at,
+            retry_stage=None,
+            retry_code=None,
+            retry_message=None,
         )
 
     def with_failed(
@@ -302,6 +347,9 @@ class AnalysisJob:
             error_code=code,
             error_message=message,
             updated_at=updated_at,
+            retry_stage=None,
+            retry_code=None,
+            retry_message=None,
         )
 
     def public_dict(self) -> dict[str, Any]:
@@ -321,7 +369,13 @@ class AnalysisJob:
             "updatedAt": _wire_timestamp(self.updated_at),
             "expiresAt": _wire_timestamp(self.expires_at),
         }
-        if self.state in {"queued", "processing", "completed", "failed"}:
+        if self.state in {
+            "queued",
+            "processing",
+            "completed",
+            "failed",
+            "canceled",
+        }:
             result["analysis"] = {
                 "attempts": self.analysis_attempts,
                 "startedAt": _wire_timestamp(self.analysis_started_at),
@@ -338,6 +392,15 @@ class AnalysisJob:
                 ),
                 "inputTokens": self.input_tokens,
                 "outputTokens": self.output_tokens,
+                "retry": (
+                    {
+                        "stage": self.retry_stage,
+                        "code": self.retry_code,
+                        "message": self.retry_message,
+                    }
+                    if self.retry_code is not None
+                    else None
+                ),
             }
         if self.state == "completed":
             result["results"] = {
@@ -389,6 +452,15 @@ class AnalysisJob:
                     "message": self.error_message,
                 }
                 if self.error_code is not None
+                else None
+            ),
+            "retry": (
+                {
+                    "stage": self.retry_stage,
+                    "code": self.retry_code,
+                    "message": self.retry_message,
+                }
+                if self.retry_code is not None
                 else None
             ),
         }
@@ -462,6 +534,7 @@ class AnalysisJob:
         )
         detections = value.get("detections")
         error = value.get("error")
+        retry = value.get("retry")
 
         if state == "processing" and analysis_started_at is None:
             raise JobDomainError("Processing jobs require a start timestamp")
@@ -499,6 +572,25 @@ class AnalysisJob:
         elif error is not None:
             raise JobDomainError("Only failed jobs may store an error")
 
+        retry_stage = retry_code = retry_message = None
+        if retry is not None:
+            if state != "queued" or not isinstance(retry, dict):
+                raise JobDomainError("Only queued jobs may store retry details")
+            retry_stage = _clean_error_text(
+                retry.get("stage"), "retry stage", 32
+            )
+            retry_code = retry.get("code")
+            if not isinstance(retry_code, str) or not ERROR_CODE_PATTERN.fullmatch(
+                retry_code
+            ):
+                raise JobDomainError("Stored retry code is invalid")
+            retry_message = _clean_error_text(
+                retry.get("message"), "retry message", 500
+            )
+
+        if state == "canceled" and analysis_completed_at is None:
+            raise JobDomainError("Canceled job metadata is invalid")
+
         return cls(
             job_id=job_id,
             client_request_id=client_request_id,
@@ -529,6 +621,9 @@ class AnalysisJob:
             error_stage=error_stage,
             error_code=error_code,
             error_message=error_message,
+            retry_stage=retry_stage,
+            retry_code=retry_code,
+            retry_message=retry_message,
         )
 
 

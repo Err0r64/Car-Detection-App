@@ -16,7 +16,8 @@ and persistent job state remain in Google Cloud.
 4. The proxy is streamed directly to the short-lived signed Cloud Storage URL.
    The Cloud Run bearer token is never attached to this request.
 5. Electron confirms the upload and polls the private job endpoint while Cloud
-   Tasks runs Gemini.
+   Tasks runs Gemini. A retrying job reports its bounded reason and next attempt
+   instead of appearing as a new generic queue wait.
 6. Completed detections are schema-validated, written to the private analysis
    work directory, loaded through the existing path-free preload method, and
    the cloud job and proxy are deleted.
@@ -64,6 +65,19 @@ PATH command or an explicit executable path. Polling is bounded to 60 seconds
 and individual authenticated requests are bounded to 120 seconds by config
 validation. The existing stall and absolute watchdogs cover proxy creation,
 authentication, upload, polling, result parsing, and cleanup as one run.
+
+## Queue and retry guardrails
+
+The Cloud Tasks queue intentionally runs one analysis at a time to limit Gemini
+cost and request pressure. Starting detection from Windows and macOS
+simultaneously therefore places one job behind the other; the second desktop
+must remain at **Queued in cloud** until the first task reaches a terminal state.
+
+Cloud mode uses three durable Cloud Tasks attempts and exactly one Gemini
+provider attempt per task. Gemini HTTP work has a five-minute request deadline.
+This replaces the previous nested policy, where five SDK attempts inside each of
+three task attempts could keep the single worker occupied for an excessive
+period.
 
 ## Automated verification
 
@@ -122,9 +136,29 @@ The command should print no objects when no other analyses are active.
 ## Cancellation boundary
 
 Canceling during proxy creation terminates the local process tree. Canceling
-during hashing, upload, confirmation, or polling aborts local network activity
-and attempts authenticated job deletion. Cloud Run currently rejects deletion
-while a task is actively `processing`; in that narrow state the Gemini request
-may finish server-side after the desktop stops waiting, and bucket lifecycle
-rules provide eventual cleanup. A future server-side cancellation state is
-required if Apexiel needs hard cancellation of an in-flight provider request.
+during hashing, upload, confirmation, or queued polling deletes the cloud job
+and proxy. Canceling while the worker is `processing` returns `202`, stores a
+terminal `canceled` job, and deletes the proxy. The already-issued Gemini HTTP
+request cannot be interrupted from another process, but it is bounded to five
+minutes; when it returns, the worker discards the result, acknowledges the task,
+and does not retry. The retained job record prevents redelivery from reviving
+the job and expires through the seven-day bucket lifecycle.
+
+## Two-device regression test
+
+Run this only after redeploying the analysis service with the current code:
+
+1. Start detection on Windows and wait until it reports **Cloud analysis**.
+2. Start detection on macOS. Confirm it remains at **Queued in cloud** while the
+   Windows job owns the single worker.
+3. Cancel the Windows analysis. Confirm the Windows UI returns to idle without
+   an error dialog.
+4. Confirm the macOS job begins cloud analysis after the canceled provider call
+   returns or reaches its five-minute deadline.
+5. In Cloud Run logs, confirm the canceled job reports cancellation and never
+   logs a second attempt. If the other job retries, the desktop must show the
+   retry reason and an attempt count no higher than `3/3`.
+6. Confirm the macOS job completes normally and its detections load.
+
+Restarting either computer must not be required. A restart has no direct effect
+on Cloud Tasks; only terminal task acknowledgement clears the worker slot.

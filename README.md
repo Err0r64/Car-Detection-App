@@ -4,7 +4,7 @@ Desktop review-and-cut editor for AI-assisted motorsports video indexing, sponso
 
 ## Project Status
 
-The required scope for Phases 2 through 5 is complete and verified. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence with unsaved-change protection, and real Gemini vehicle analysis through a CFR proxy pipeline. Phase 5 cancellation, timeout, process-tree cleanup, malformed-protocol handling, and stage-specific error reporting have been manually confirmed. Phase 6 is complete and manually confirmed: CP1 provides selected-interval export, CP2 adds batch scope filtering, and CP3 adds progress, cancellation, completion summaries, and export manifests. Windows packaging now provides both an unpacked diagnostic build and an unsigned NSIS installer for controlled POC testing. Cloud Analysis CP4 now routes real desktop detection through the private Cloud Run job API using short-lived development identity tokens; installer-grade device authentication remains pending.
+The required scope for Phases 2 through 6 is implemented. The application provides the secure Electron shell and project workflow, synchronized timeline and Analysis panel, interval and metadata editing, project persistence, cloud-backed Gemini vehicle analysis, and scoped clip export. macOS packaging provides both an unpacked diagnostic application and an unsigned DMG for controlled testing; Windows packaging provides an unpacked build and unsigned NSIS installer. Cloud Analysis CP4 routes real detection through the private Cloud Run job API using short-lived development identity tokens. Installer-grade device authentication, code signing, and notarization remain pending.
 
 The following optional work remains intentionally deferred:
 
@@ -26,10 +26,13 @@ The private Cloud Run analysis service is located in
 `cloud/analysis-service`. CP1 established authenticated invocation, CP2 added
 private proxy storage and persistent job records, and CP3 added Cloud Tasks,
 integrity verification, remote prompt loading, Secret Manager-backed Gemini,
-bounded retries, and terminal results. CP4 migrates real Electron analysis to
-this API: the desktop creates the CFR proxy locally, uploads it through a signed
-URL, polls the private job, validates results, and deletes completed cloud data.
-The desktop no longer requires or receives `GEMINI_API_KEY`.
+bounded retries, cancellation guardrails, and terminal results. CP4 migrates
+real Electron analysis to this API: the desktop creates the CFR proxy locally,
+uploads it through a signed URL, polls the private job, validates results, and
+deletes completed cloud data. Processing cancellations are durable, late worker
+results cannot revive canceled jobs, and cloud workers make one bounded Gemini
+call per Cloud Tasks attempt. The desktop no longer requires or receives
+`GEMINI_API_KEY`.
 
 Development runs authenticate with the signed-in Google Cloud CLI identity. This
 is not the final installer-grade user authentication design. See
@@ -37,43 +40,62 @@ is not the final installer-grade user authentication design. See
 ## Prerequisites
 
 - Node.js LTS, including npm
-- Python 3 available as `python` on `PATH`
+- Python 3 available as `py` or `python` on Windows, or `python3` on macOS
 - `ffmpeg` and `ffprobe` available on `PATH`
 - Google Cloud CLI installed and signed in for real cloud analysis
 - The signed-in account granted `roles/run.invoker` on the analysis service
+
+The same source checkout supports Windows and macOS. The setup command creates a
+platform-specific `.venv` and verifies Python, FFmpeg, and ffprobe. Electron
+automatically selects the virtual environment for the current operating system.
 
 The local desktop needs no Gemini SDK or Gemini API key. Python and FFmpeg create
 the proxy; Cloud Run owns prompt selection and Gemini execution.
 ## Run
 
-```powershell
+```text
 npm install
+npm run setup
 npm start
 ```
 
-## Windows Packaging (Installer Phase CP1-CP2)
+If FFmpeg is missing on macOS and you use Homebrew, install it with
+`brew install ffmpeg`, then run `npm run setup` again. On Windows, install
+FFmpeg and ensure both `ffmpeg.exe` and `ffprobe.exe` are on `PATH`.
 
-CP1 establishes the package boundary before creating an installer. `electron-builder.yml` places the Electron main and renderer code in `resources\app.asar`, while `config.json`, `detections.schema.json`, `pipeline`, and `stub` are copied to the external `resources` directory so system Python can execute them. Development builds continue resolving those files from the repository. The `runtime-paths.js` boundary selects the correct root in each environment.
+## macOS Packaging
 
-The unpacked build still expects Python, ffmpeg, and ffprobe on the host system. Cloud-analysis development runs also require an authenticated Google Cloud CLI; the desktop no longer needs local Gemini packages. CP1 does not bundle these runtimes or provide installer-grade sign-in. The build uses a local staging directory because executable patching and ASAR cleanup are unreliable on the mapped `Z:` workspace.
+`electron-builder.yml` places the Electron main and renderer code in
+`Contents/Resources/app.asar`. `config.json`, `detections.schema.json`,
+`pipeline`, and `stub` are copied beside it in `Contents/Resources` so system
+Python can execute them. The `runtime-paths.js` boundary selects the correct root
+in development and packaged environments.
+
+The builds target the current Mac architecture and expect Python 3, ffmpeg,
+ffprobe, and an authenticated Google Cloud CLI on the host. They do not contain a
+Gemini key or other Google credential. The artifacts are unsigned and not
+notarized, so they are suitable for controlled testing rather than public
+distribution.
+Finder-launched builds extend their executable search path with standard
+Homebrew, Python Framework, and user Cloud SDK locations.
 
 ### CP1 packaged-build verification
 
-Install dependencies, run the automated tests, and create the unpacked Windows application:
+Install dependencies, run the automated tests, and create the unpacked macOS application:
 
-```powershell
+```bash
 npm install
 npm test
-npm run pack:win
+npm run pack:mac
 
-$appRoot = Join-Path $env:LOCALAPPDATA 'CapstoneVideoEditorBuild\win-unpacked'
-Get-Item -LiteralPath `
-  (Join-Path $appRoot 'Capstone Video Editor.exe'), `
-  (Join-Path $appRoot 'resources\app.asar'), `
-  (Join-Path $appRoot 'resources\config.json'), `
-  (Join-Path $appRoot 'resources\pipeline\analyze.py'), `
-  (Join-Path $appRoot 'resources\stub\fake_analysis.py')
-Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
+appRoot="$(find dist -type d -name 'Capstone Video Editor.app' | head -n 1)"
+resources="$appRoot/Contents/Resources"
+test -x "$appRoot/Contents/MacOS/Capstone Video Editor"
+test -f "$resources/app.asar"
+test -f "$resources/config.json"
+test -f "$resources/pipeline/analyze.py"
+test -f "$resources/stub/fake_analysis.py"
+"$appRoot/Contents/MacOS/Capstone Video Editor"
 ```
 
 1. Confirm the packaged application opens directly to the project-selection screen without a console window or startup error.
@@ -83,29 +105,39 @@ Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
 
 To verify that the packaged app launches its external stub resource, close the application and enable the stub in the generated config:
 
-```powershell
-$configPath = Join-Path $appRoot 'resources\config.json'
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-$config.useDevStub = $true
-[IO.File]::WriteAllText(
-  $configPath,
-  ($config | ConvertTo-Json -Depth 5),
-  [Text.UTF8Encoding]::new($false)
-)
-Start-Process -FilePath (Join-Path $appRoot 'Capstone Video Editor.exe')
+```bash
+configPath="$resources/config.json"
+sed -i '' 's/"useDevStub": false/"useDevStub": true/' "$configPath"
+"$appRoot/Contents/MacOS/Capstone Video Editor"
 ```
 
 Open a project and video, then select **Detect Vehicles**. Expect all five analysis stages to complete and one detection to appear without requiring `GEMINI_API_KEY` or making a network request. Close the application and restore the generated config:
 
-```powershell
-$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-$config.useDevStub = $false
-[IO.File]::WriteAllText(
-  $configPath,
-  ($config | ConvertTo-Json -Depth 5),
-  [Text.UTF8Encoding]::new($false)
-)
+```bash
+sed -i '' 's/"useDevStub": true/"useDevStub": false/' "$configPath"
 ```
+
+### macOS installer (DMG)
+
+Build the installable disk image from the repository root:
+
+```bash
+npm install
+npm test
+npm run installer:mac
+
+installer="$(find dist -maxdepth 1 -name '*.dmg' | head -n 1)"
+test -f "$installer"
+shasum -a 256 "$installer"
+open "$installer"
+```
+
+Drag **Capstone Video Editor** into **Applications**. Because the controlled-test
+build is unsigned, macOS may require opening it once through **Control-click >
+Open**. Public distribution requires a Developer ID certificate, hardened
+runtime, and Apple notarization.
+
+## Windows Packaging
 
 ### Controlled-tester installer (CP2)
 
@@ -133,7 +165,7 @@ winget install --exact --id Gyan.FFmpeg
 winget install --exact --id Google.CloudSDK
 ```
 
-Restart Windows after installation so desktop applications receive the updated `PATH`. A project administrator must grant the tester account only Cloud Run invocation access:
+Close and reopen the application after installing prerequisites. On Windows, the app refreshes the current machine and user `PATH` values at startup. A project administrator must grant the tester account only Cloud Run invocation access:
 
 ```powershell
 gcloud run services add-iam-policy-binding apexiel-analysis-service `
@@ -440,7 +472,7 @@ The Gemini request samples the 2 FPS proxy at the same 2 FPS cadence, uses seed 
 
 Bounds are clamped to the source duration. Intervals that collapse to zero length only because they lie outside the source are omitted, while model-provided zero-length or reversed intervals remain parsing errors. MM:SS strings are accepted at the model boundary; when both bounds exceed the clip duration, a valid concatenated MMSS pair such as `115-137` is narrowly recovered as `75-97` before validation. Rich response fields map directly to the application: `is_target_vehicle` becomes `subject`, `vehicle_description` becomes `notes`, and `detection_confidence` is retained.
 
-Gemini calls are limited to five requests per rolling minute by default and are spaced at least 12 seconds apart. Request history is shared across Electron analysis subprocesses through `gemini-rate-limit.json` in the application user-data directory. Transient `429`, `500`, `502`, `503`, and `504` responses are retried up to five total attempts using server-provided delays or exponential backoff with jitter. The analyzing status reports rate-limit and retry waits. Set `HARNESS_RPM`, `GEMINI_MIN_REQUEST_INTERVAL_S`, or `GEMINI_MAX_ATTEMPTS` before starting Electron to tune these safeguards.
+The direct local Gemini harness limits calls to five requests per rolling minute by default, spaces them at least 12 seconds apart, and retries transient `429`, `500`, `502`, `503`, and `504` responses up to five total attempts. Request history is shared through `gemini-rate-limit.json` in the application user-data directory. Set `HARNESS_RPM`, `GEMINI_MIN_REQUEST_INTERVAL_S`, or `GEMINI_MAX_ATTEMPTS` before starting a direct local run to tune those safeguards. Cloud analysis instead makes one provider attempt per durable Cloud Tasks delivery, allows at most three task attempts, and gives each Gemini HTTP request a five-minute deadline. This prevents nested retries from multiplying one failed job into as many as 15 provider calls.
 
 Stdout is reserved for flushed JSONL protocol events across `proxy`, `upload`, `processing`, `analyzing`, and `parsing`; diagnostics are written only to stderr. `GEMINI_API_KEY` is read only from the environment. Use `--dry-run` to exercise every stage with a canned model response and no key, network request, or API cost.
 
@@ -543,20 +575,24 @@ The first event should report `proxyCached: False`, `proxyFps: 2`, and either an
 
 ```json
 {
-  "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
+  "ffprobePath": "ffprobe",
   "analysisStallTimeoutSeconds": 300,
   "analysisMaxTimeoutSeconds": 2700,
   "analysisServiceUrl": "https://apexiel-analysis-service-316801639479.us-west1.run.app",
-  "analysisGcloudPath": "gcloud.cmd",
   "analysisPollIntervalSeconds": 5,
   "analysisRequestTimeoutSeconds": 30,
   "useDevStub": false
 }
 ```
 
-Relative `analyzeScript` paths resolve from the application root.
+When `pythonPath` is omitted, Electron uses `.venv\Scripts\python.exe` on
+Windows or `.venv/bin/python` on macOS when present, then falls back to the
+platform's standard Python 3 command. Add an explicit `pythonPath` only when a
+custom interpreter is required. Relative `analyzeScript` paths resolve from the
+application root. `analysisGcloudPath` may be set for a custom Google Cloud CLI;
+when omitted it defaults to `gcloud.cmd` on Windows and `gcloud` elsewhere.
 `analysisServiceUrl` must use HTTPS outside localhost. The stall watchdog resets
 on proxy output, upload progress, and successful cloud polls; the maximum timeout
 covers the complete local-and-cloud run. Poll intervals cannot exceed 60 seconds
@@ -744,6 +780,7 @@ The isolated preload API exposes project-location, project-creation, video-impor
 - `prompt-profile-client.js` - remote profile validation, ETag caching, compatibility checks, and fallback selection
 - `config.json` - Python, analysis-script, ffmpeg, prompt-service, timeout, and offline-stub selection
 - `python-runtime.js` - Python discovery and pipeline dependency preflight
+- `runtime-environment.js` - macOS executable-path discovery for installed builds
 - `preload.js` - isolated `contextBridge` API exposed as `window.editorAPI`
 - `renderer/index.html` - project selection and editor markup
 - `renderer/app.js` - renderer application state and view coordination

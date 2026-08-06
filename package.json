@@ -5,8 +5,11 @@
   "author": "Apexiel Capstone Team",
   "main": "main.js",
   "scripts": {
+    "setup": "node scripts/setup.js",
     "start": "electron .",
     "test": "node --test --test-isolation=none",
+    "pack:mac": "electron-builder --mac --dir",
+    "installer:mac": "electron-builder --mac dmg",
     "pack:win": "node scripts/pack-win.js",
     "installer:win": "node scripts/installer-win.js"
   },

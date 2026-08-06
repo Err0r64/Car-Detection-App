@@ -4,10 +4,10 @@ This service is the cloud control plane for versioned analysis prompts. It runs
 independently from the Electron application so Apexiel can publish prompt changes
 without rebuilding or redistributing the desktop installer.
 
-This service hosts only prompt profiles. Before real analysis, the desktop reads
-and caches the active domain instructions, then combines them with its local
-response contract. Proxy creation and authenticated Gemini calls continue to run
-locally in the desktop pipeline.
+This service hosts only prompt profiles. Before real analysis, the private Cloud
+Run analysis worker reads the active domain instructions and combines them with
+the validated response contract. The desktop never receives prompt instructions,
+and authenticated Gemini calls run only in the analysis worker.
 
 ## Service boundary
 
@@ -263,8 +263,8 @@ python scripts\prompt_admin.py `
   unknown request fields are validated.
 - Firestore publication uses a transaction, so clients cannot observe a partial
   active-profile update.
-- The desktop will cache the last valid profile and retain a built-in fallback
-  in the next checkpoint.
+- The analysis worker validates the active profile and its ETag for every job;
+  prompt-service failures remain retryable job failures.
 - The prompt is configuration, not a secret. The public endpoint intentionally
   allows it to be read.
 

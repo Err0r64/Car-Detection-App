@@ -1,11 +1,10 @@
 {
-  "pythonPath": "python",
   "analyzeScript": "pipeline/analyze.py",
   "ffmpegPath": "ffmpeg",
+  "ffprobePath": "ffprobe",
   "analysisStallTimeoutSeconds": 300,
   "analysisMaxTimeoutSeconds": 2700,
   "analysisServiceUrl": "https://apexiel-analysis-service-316801639479.us-west1.run.app",
-  "analysisGcloudPath": "gcloud.cmd",
   "analysisPollIntervalSeconds": 5,
   "analysisRequestTimeoutSeconds": 30,
   "useDevStub": false

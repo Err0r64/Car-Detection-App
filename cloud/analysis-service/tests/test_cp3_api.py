@@ -40,9 +40,12 @@ class FakeWorker:
     def __init__(self, failure: WorkerError | None = None) -> None:
         self.failure = failure
         self.calls = 0
+        self.on_run = None
 
     def run(self, job):
         self.calls += 1
+        if self.on_run is not None:
+            self.on_run(job)
         if self.failure is not None:
             raise self.failure
         return WorkerResult(
@@ -137,7 +140,12 @@ class Cp3ApiTests(unittest.TestCase):
         self.upload_and_queue()
 
         self.assertEqual(self.run_task().status_code, 503)
-        self.assertEqual(self.store.get(JOB_ID).state, "queued")
+        retrying = self.store.get(JOB_ID)
+        self.assertEqual(retrying.state, "queued")
+        self.assertEqual(
+            retrying.public_dict()["analysis"]["retry"]["code"],
+            "prompt_unavailable",
+        )
         self.assertEqual(self.run_task(retry_count=1).status_code, 503)
         terminal = self.run_task(retry_count=2)
         self.assertEqual(terminal.status_code, 200)
@@ -159,14 +167,34 @@ class Cp3ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["job"]["state"], "failed")
         self.assertEqual(self.worker.calls, 1)
 
-    def test_processing_jobs_reject_delete_and_duplicate_initial_delivery(self) -> None:
+    def test_processing_job_can_be_canceled_and_retries_are_suppressed(self) -> None:
         self.upload_and_queue()
         self.store.update(JOB_ID, lambda job: job.with_processing(NOW))
 
         duplicate = self.run_task()
         self.assertEqual(duplicate.status_code, 409)
+
         deletion = self.client.delete(f"/v1/analysis/jobs/{JOB_ID}")
-        self.assertEqual(deletion.status_code, 409)
+        self.assertEqual(deletion.status_code, 202)
+        self.assertEqual(deletion.json()["job"]["state"], "canceled")
+        self.assertIsNone(self.uploads.inspect(f"uploads/{JOB_ID}/proxy.mp4"))
+
+        redelivery = self.run_task(retry_count=1)
+        self.assertEqual(redelivery.status_code, 200)
+        self.assertEqual(redelivery.json()["job"]["state"], "canceled")
+        self.assertEqual(self.worker.calls, 0)
+
+    def test_late_worker_result_cannot_overwrite_cancellation(self) -> None:
+        self.upload_and_queue()
+        self.worker.on_run = lambda job: self.store.update(
+            job.job_id,
+            lambda current: current.with_canceled(NOW),
+        )
+
+        response = self.run_task()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["job"]["state"], "canceled")
+        self.assertNotIn("results", response.json()["job"])
 
 
 if __name__ == "__main__":
